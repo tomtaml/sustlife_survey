@@ -48,6 +48,7 @@ os.makedirs(DATA_DIR, exist_ok=True)
 # Master driver workbook (keep in same folder as the app)
 def find_driver_workbook() -> str:
     candidates = [
+        "Suslife_master_driver_v3_bio_anchor.xlsx",
         "Suslife_master_driver_v2_harmonized_vignettes.xlsx",
         "Suslife_master_driver_v2_checked.xlsx",
         "Suslife_master_driver.xlsx",
@@ -628,6 +629,30 @@ def values_exact_two_sevens(items_df: pd.DataFrame) -> bool:
         return False
     return True
 
+
+
+def should_render_item(item_row: pd.Series, context: dict) -> bool:
+    """Minimal conditional display for anchor follow-up open text items."""
+    item_id = str(item_row.get("item_id", "")).strip()
+
+    # Plastic follow-up: show only if more than 20% is left unsorted
+    if item_id == "PL_ANCHOR_OE":
+        pct = get_answer_value("PL_UNSORT_PCT")
+        try:
+            return float(pct) > 20
+        except Exception:
+            return False
+
+    # Bio follow-up: show only if estimated sorted share is under 80%
+    if item_id == "BIO_ANCHOR_OE":
+        pct = get_answer_value("BIO_SORT_PCT")
+        try:
+            return float(pct) < 80
+        except Exception:
+            return False
+
+    return True
+
 def render_item(item_row: pd.Series, context: dict, scale_map: dict):
     """
     Excel-driven rendering.
@@ -1052,6 +1077,8 @@ if is_vignette_page:
 
         else:
             for _, r in item_rows.iterrows():
+                if not should_render_item(r, context):
+                    continue
                 answers[str(r["item_id"]).strip()] = render_item(r, context, scale_map)
 
         submitted = st.form_submit_button("Tallenna ja jatka")
@@ -1120,6 +1147,8 @@ else:
         for _, r in item_rows.iterrows():
             item_id = str(r["item_id"]).strip()
             if item_id in answers:   # already rendered in matrix
+                continue
+            if not should_render_item(r, context):
                 continue
             answers[item_id] = render_item(r, context, scale_map)
 
@@ -1220,7 +1249,7 @@ else:
                 if str(page_id).startswith("BIO_") or str(page_id) == "P9_END":
                     st.session_state["answers"]["final"]["timestamp_end"] = datetime.now().isoformat()
                     path = save_jsonl(st.session_state["answers"])
-                    st.success(f"Kiitos! Vastaukset tallennettu tiedostoon: {path}")
+                    st.success(f"Kiitos! Vastaukset tallennettu palvelimen data-kansioon: {path}")
                     st.session_state["answers"]["meta"]["saved_path"] = path
                     with open(path, "rb") as f:
                         st.download_button(
