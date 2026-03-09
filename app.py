@@ -212,20 +212,32 @@ def ensure_vignette_pool(flow_df: pd.DataFrame, vigs_df: pd.DataFrame, scale_map
     if st.session_state.get("plastic_pool") and st.session_state.get("bio_pool"):
         return
 
+    meta = st.session_state.get("answers", {}).get("meta", {})
+    core = st.session_state.get("answers", {}).get("core", {})
+
     area = get_answer_value("AREA_TYPE")
     housing = get_answer_value("HOUSING")
     compost = get_answer_value("COMPOST")
     bio_anchor = get_answer_value("BIO_SORT_ANCHOR")
 
-    if area is None or housing is None:
-        return
+    # Extra fallbacks in case widgets were on earlier pages and only persisted in answers/meta
+    if area is None:
+        area = meta.get("AREA_TYPE", meta.get("area_type", core.get("AREA_TYPE")))
+    if housing is None:
+        housing = meta.get("HOUSING", meta.get("housing", core.get("HOUSING")))
+    if compost is None:
+        compost = meta.get("COMPOST", core.get("COMPOST"))
+    if bio_anchor is None:
+        bio_anchor = meta.get("BIO_SORT_ANCHOR", core.get("BIO_SORT_ANCHOR"))
 
     def decode_label(scale_id: str, value):
         sid = str(scale_id).strip()
+        if value is None:
+            return None
         if sid not in scale_map:
             return value
         for vv, lbl in scale_map[sid]:
-            if vv == value:
+            if vv == value or str(vv) == str(value):
                 return lbl
             try:
                 if float(vv) == float(value):
@@ -234,26 +246,31 @@ def ensure_vignette_pool(flow_df: pd.DataFrame, vigs_df: pd.DataFrame, scale_map
                 pass
         return value
 
-    area_label = decode_label("AREA_TYPES", area)
-    housing_label = decode_label("HOUSING_TYPES", housing)
+    # If stratum was already derived earlier, reuse it even if raw route widgets are no longer live
+    stratum = st.session_state.get("stratum") or meta.get("stratum")
+    area_label = meta.get("area_type_label")
+    housing_label = meta.get("housing_label")
 
-    stratum = route_stratum(str(area_label), str(housing_label))
-    st.session_state["stratum"] = stratum
+    if not stratum:
+        if area is None or housing is None:
+            return
+        area_label = area_label or decode_label("AREA_TYPES", area)
+        housing_label = housing_label or decode_label("HOUSING_TYPES", housing)
+        stratum = route_stratum(str(area_label), str(housing_label))
+        st.session_state["stratum"] = stratum
 
     pool = vigs_df.copy()
     if "active" in pool.columns:
         pool = pool[pool["active"].fillna(1).astype(int) == 1]
 
-    pool = pool[pool["stratum"].astype(str) == stratum]
+    pool = pool[pool["stratum"].astype(str).str.strip() == str(stratum).strip()]
 
-    # Drop exact duplicates robustly (some Excel exports can duplicate rows)
     dedup_cols = [c for c in ["vignette_id", "arm_id", "waste", "stratum", "text_fi"] if c in pool.columns]
     if dedup_cols:
         pool = pool.drop_duplicates(subset=dedup_cols, keep="first")
     if "vignette_id" in pool.columns:
         pool = pool.drop_duplicates(subset=["vignette_id"], keep="first")
 
-    # Active composter override for bio (drop service/start arms)
     is_active_composter = False
     try:
         is_compost = (compost in (1, "1", True, "Kyllä", "kyllä"))
@@ -266,59 +283,54 @@ def ensure_vignette_pool(flow_df: pd.DataFrame, vigs_df: pd.DataFrame, scale_map
         """Pick up to n unique vignettes preferring unique arm_id then vignette_id."""
         if df.empty:
             return []
-        # Shuffle rows
         rows = df.to_dict("records")
         random.shuffle(rows)
 
-        picked=[]
-        seen_vid=set()
-        seen_arm=set()
-        # Pass 1: enforce unique arm_id + vignette_id
+        picked = []
+        seen_vid = set()
+        seen_arm = set()
+
         for r in rows:
-            vid=str(r.get("vignette_id",""))
-            arm=str(r.get("arm_id",""))
+            vid = str(r.get("vignette_id", ""))
+            arm = str(r.get("arm_id", ""))
             if vid and vid in seen_vid:
                 continue
             if arm and arm in seen_arm:
                 continue
             picked.append(r)
-            if vid: seen_vid.add(vid)
-            if arm: seen_arm.add(arm)
+            if vid:
+                seen_vid.add(vid)
+            if arm:
+                seen_arm.add(arm)
             if len(picked) >= n:
                 return picked
 
-        # Pass 2: relax arm uniqueness, keep vignette_id uniqueness
         for r in rows:
-            vid=str(r.get("vignette_id",""))
+            vid = str(r.get("vignette_id", ""))
             if vid and vid in seen_vid:
                 continue
             picked.append(r)
-            if vid: seen_vid.add(vid)
+            if vid:
+                seen_vid.add(vid)
             if len(picked) >= n:
                 break
         return picked[:n]
 
-    pl_df = pool[pool["waste"].astype(str) == "plastic"]
+    pl_df = pool[pool["waste"].astype(str).str.strip() == "plastic"]
     pl = pick_unique(pl_df, n=3)
 
-    bio_df = pool[pool["waste"].astype(str) == "bio"]
+    bio_df = pool[pool["waste"].astype(str).str.strip() == "bio"]
     if is_active_composter and "arm_id" in bio_df.columns:
         drop_arms = {"BioA10", "BioA11"}
         bio_df = bio_df[~bio_df["arm_id"].astype(str).isin(drop_arms)]
     bio = pick_unique(bio_df, n=3)
-
-    # If still short, show a visible warning (but keep running)
-    if len(pl) < 3:
-        st.warning(f"Huom: Muovi‑tilannekuvia löytyi vain {len(pl)}/3 tälle ryhmälle ({stratum}). Lisää aktiivisia vignettes‑rivejä.")
-    if len(bio) < 3:
-        st.warning(f"Huom: Bio‑tilannekuvia löytyi vain {len(bio)}/3 tälle ryhmälle ({stratum}). Lisää aktiivisia vignettes‑rivejä.")
 
     st.session_state["plastic_pool"] = pl
     st.session_state["bio_pool"] = bio
     st.session_state["vignette_pool"] = pl + bio
     st.session_state["plastic_pos"] = 0
     st.session_state["bio_pos"] = 0
-    st.session_state["vignette_pos"] = 0  # legacy compatibility
+    st.session_state["vignette_pos"] = 0
 
     st.session_state["answers"].setdefault("meta", {})
     st.session_state["answers"]["meta"].update({
@@ -1122,6 +1134,13 @@ else:
         for meta_id in ["AREA_TYPE", "HOUSING", "COMPOST", "BIO_SORT_ANCHOR", "PL_SORT_ANCHOR"]:
             if meta_id in answers and answers.get(meta_id) is not None:
                 st.session_state["answers"]["meta"][meta_id] = answers.get(meta_id)
+
+        # Try to initialize vignette routing as soon as the required routing answers exist
+        if (
+            st.session_state["answers"]["meta"].get("AREA_TYPE") is not None
+            and st.session_state["answers"]["meta"].get("HOUSING") is not None
+        ):
+            ensure_vignette_pool(flow_df, vigs_df, scale_map)
 
         # --- Consent gate: if page includes CONSENT, require it ---
         if "CONSENT" in tokens:
