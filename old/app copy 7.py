@@ -1,7 +1,6 @@
 import json
 import os
 import random
-import requests
 import uuid
 from datetime import datetime
 
@@ -47,7 +46,19 @@ DATA_DIR = os.path.join(BASE_DIR, "data")
 os.makedirs(DATA_DIR, exist_ok=True)
 
 # Master driver workbook (keep in same folder as the app)
-DRIVER_XLSX = os.path.join(BASE_DIR, "Suslife_master_driver.xlsx")
+def find_driver_workbook() -> str:
+    candidates = [
+        "Suslife_master_driver_v2_harmonized_vignettes.xlsx",
+        "Suslife_master_driver_v2_checked.xlsx",
+        "Suslife_master_driver.xlsx",
+    ]
+    for name in candidates:
+        path = os.path.join(BASE_DIR, name)
+        if os.path.exists(path):
+            return path
+    return os.path.join(BASE_DIR, "Suslife_master_driver.xlsx")
+
+DRIVER_XLSX = find_driver_workbook()
 
 # Sheet names (fixed in the starter template)
 SHEET_ITEMS = "ITEMS"
@@ -165,7 +176,7 @@ def load_driver(path: str):
         if lbl:
             construct_label_map[(cid, w)] = lbl
 
-        return items, flow, vigs, model, scale_map, construct_label_map
+    return items, flow, vigs, model, scale_map, construct_label_map
 
 
 def save_jsonl(payload: dict) -> str:
@@ -177,67 +188,23 @@ def save_jsonl(payload: dict) -> str:
     return path
 
 
-def build_submission_payload() -> dict:
-    answers = st.session_state.get("answers", {})
-    meta = answers.get("meta", {})
-    core = answers.get("core", {})
-    final = answers.get("final", {})
-    plastic_final = final.get("plastic", {}) if isinstance(final, dict) else {}
-    bio_final = final.get("bio", {}) if isinstance(final, dict) else {}
-
-    return {
-        "submitted_at": datetime.now().isoformat(),
-        "respondent_id": st.session_state.get("respondent_id", ""),
-        "stratum": st.session_state.get("stratum") or meta.get("stratum", ""),
-        "area_type": meta.get("AREA_TYPE", core.get("AREA_TYPE", "")),
-        "housing": meta.get("HOUSING", core.get("HOUSING", "")),
-        "is_active_composter": meta.get("COMPOST", core.get("COMPOST", "")),
-        "plastic_choice": plastic_final.get("forced_choice", ""),
-        "bio_choice": bio_final.get("forced_choice", ""),
-        "payload_json": json.dumps(answers, ensure_ascii=False),
-        "answers": answers,
-    }
-
-
-def save_to_apps_script(payload: dict):
-    url = ""
-    try:
-        apps_script_section = st.secrets.get("apps_script", {})
-        if isinstance(apps_script_section, dict):
-            url = str(apps_script_section.get("url", "")).strip()
-        else:
-            url = str(getattr(apps_script_section, "url", "") or "").strip()
-    except Exception:
-        url = ""
-
-    if not url:
-        return False, "Apps Script URL puuttuu Streamlit-secretsistä."
-
-    try:
-        resp = requests.post(url, json=payload, timeout=20)
-        resp.raise_for_status()
-        data = resp.json()
-        if isinstance(data, dict) and data.get("ok"):
-            return True, "Google Sheets"
-        return False, (data.get("error") if isinstance(data, dict) else "Tuntematon Apps Script -virhe.")
-    except Exception as e:
-        return False, str(e)
-
-
-def persist_submission() -> tuple[bool, str, str]:
-    payload = build_submission_payload()
-    ok, detail = save_to_apps_script(payload)
-    if ok:
-        return True, "apps_script", "Kiitos! Vastaukset tallennettu Google Sheetiin."
-
-    path = save_jsonl(payload)
-    st.session_state.setdefault("answers", {}).setdefault("meta", {})["saved_path"] = path
-    return True, "jsonl", f"Kiitos! Vastaukset tallennettu palvelimen data-kansioon: {path}"
-
 def get_state_ending(suffix: str):
     for k, v in st.session_state.items():
         if k.endswith(suffix):
             return v
+    return None
+
+def get_answer_value(item_id: str):
+    # Prefer current widget state, then persisted answers
+    v = get_state_ending("_" + item_id)
+    if v is not None:
+        return v
+    meta = st.session_state.get("answers", {}).get("meta", {})
+    core = st.session_state.get("answers", {}).get("core", {})
+    final = st.session_state.get("answers", {}).get("final", {})
+    for bucket in (meta, core, final):
+        if item_id in bucket and bucket[item_id] is not None:
+            return bucket[item_id]
     return None
 
 def ensure_vignette_pool(flow_df: pd.DataFrame, vigs_df: pd.DataFrame, scale_map: dict):
@@ -245,10 +212,10 @@ def ensure_vignette_pool(flow_df: pd.DataFrame, vigs_df: pd.DataFrame, scale_map
     if st.session_state.get("plastic_pool") and st.session_state.get("bio_pool"):
         return
 
-    area = get_state_ending("_AREA_TYPE")
-    housing = get_state_ending("_HOUSING")
-    compost = get_state_ending("_COMPOST")
-    bio_anchor = get_state_ending("_BIO_SORT_ANCHOR")
+    area = get_answer_value("AREA_TYPE")
+    housing = get_answer_value("HOUSING")
+    compost = get_answer_value("COMPOST")
+    bio_anchor = get_answer_value("BIO_SORT_ANCHOR")
 
     if area is None or housing is None:
         return
@@ -355,6 +322,10 @@ def ensure_vignette_pool(flow_df: pd.DataFrame, vigs_df: pd.DataFrame, scale_map
 
     st.session_state["answers"].setdefault("meta", {})
     st.session_state["answers"]["meta"].update({
+        "AREA_TYPE": area,
+        "HOUSING": housing,
+        "COMPOST": compost,
+        "BIO_SORT_ANCHOR": bio_anchor,
         "area_type": area,
         "housing": housing,
         "area_type_label": area_label,
@@ -968,28 +939,12 @@ if is_vignette_page:
 
     vignette, lane, idx, pool = get_vignette_for_page(page_id)
     if vignette is None:
-        st.error(f"Vignette missing for this page (lane={lane}, idx={idx}, pool_size={len(pool)}).")
-    else:
-        # DEBUG (remove later)
-        try:
-            pool_ids = [f"{v.get('vignette_id')}({v.get('arm_id')})" for v in pool]
-        except Exception:
-            pool_ids = []
-        st.caption(f"DEBUG page_id={page_id} lane={lane} idx={idx} pool={pool_ids}")
-
-        img_ref = extract_first_image_ref(str((context.get("vignette") or {}).get("text_fi","")))
-        try:
-            from pathlib import Path
-            img_name = Path(img_ref).name if img_ref else "-"
-        except Exception:
-            img_name = "-"
-        st.caption(
-            f"Vignette: {(context.get("vignette") or {}).get('vignette_id')} | Arm: {(context.get("vignette") or {}).get('arm_id')} | "
-            f"Stratum: {(context.get("vignette") or {}).get('stratum')} | Waste: {(context.get("vignette") or {}).get('waste')} | Image: {img_name}"
+        st.error(
+            f"Vignette missing for this page / stratum. page={page_id}, stratum={st.session_state.get('stratum')}, "
+            f"plastic={len(st.session_state.get('plastic_pool', []))}, bio={len(st.session_state.get('bio_pool', []))}"
         )
-        render_markdown_with_media(str((context.get("vignette") or {}).get("text_fi","")), BASE_DIR)
 
-
+    # QA: show vignette preview thumbnails + IDs in sidebar (helps verify mapping)
     # QA: show vignette preview thumbnails + IDs in sidebar (helps verify mapping)
     with st.sidebar.expander("Vignette previews (QA)", expanded=True):
         pool = st.session_state.get("vignette_pool") or []
@@ -1124,7 +1079,6 @@ else:
             "page_id": page_id,
             "_shown_anchors": set(),
             "construct_label_map": construct_label_map,
-        "constructs_to_show_items": (context.get("vignette") or {}).get("constructs_to_show_items") or (context.get("vignette") or {}).get("constructs_to_show") or "",
         }
         # Inject vignette_pool for final ranking/choice rendering
         if page_id.upper().startswith("P6") or "FINAL" in tokens:
@@ -1160,6 +1114,15 @@ else:
         submitted = st.form_submit_button("Jatka")
 
     if submitted:
+        st.session_state["answers"].setdefault("core", {})
+        st.session_state["answers"].setdefault("meta", {})
+        for item_id, value in answers.items():
+            if value is not None:
+                st.session_state["answers"]["core"][item_id] = value
+        for meta_id in ["AREA_TYPE", "HOUSING", "COMPOST", "BIO_SORT_ANCHOR", "PL_SORT_ANCHOR"]:
+            if meta_id in answers and answers.get(meta_id) is not None:
+                st.session_state["answers"]["meta"][meta_id] = answers.get(meta_id)
+
         # --- Consent gate: if page includes CONSENT, require it ---
         if "CONSENT" in tokens:
             consent_val = None
@@ -1204,9 +1167,9 @@ else:
                         freq_bio = v
                 st.session_state["answers"]["core"]["freq_bio"] = freq_bio
 
-        # --- Summary/final page handling ---
-        is_summary_page = (str(page_id).endswith("_FINAL") or any(t in tokens for t in ["RANK1", "RANK2", "RANK3", "CHOICE", "WHY"]))
-        if is_summary_page:
+        # --- Final page detection ---
+        is_final_page = (str(page_id).endswith("_FINAL") or any(t in tokens for t in ["RANK1","RANK2","RANK3","CHOICE","WHY"]))
+        if is_final_page:
             r1 = get_state_ending("_RANK1")
             r2 = get_state_ending("_RANK2")
             r3 = get_state_ending("_RANK3")
@@ -1217,40 +1180,23 @@ else:
 
             choice = get_state_ending("_CHOICE")
             if choice is not None:
-                final_bucket = st.session_state["answers"].setdefault("final", {})
-                page_result = {
+                st.session_state["answers"]["final"] = {
                     "ranking": {"1": r1, "2": r2, "3": r3},
                     "forced_choice": choice,
                     "open_rationale": (get_state_ending("_WHY") or "").strip(),
-                    "captured_at": datetime.now().isoformat(),
+                    "timestamp_end": datetime.now().isoformat(),
                 }
-
-                if str(page_id).upper() == "PL_FINAL":
-                    final_bucket["plastic"] = page_result
-                elif str(page_id).upper() == "BIO_FINAL":
-                    final_bucket["bio"] = page_result
-                else:
-                    final_bucket[str(page_id)] = page_result
-
-        # Save only on the true final thank-you page (or the last page in FLOW)
-        is_end_page = str(page_id).upper() == "P9_END" or st.session_state["page_idx"] >= (len(flow_df) - 1)
-        if is_end_page:
-            ok, save_mode, message = persist_submission()
-            if save_mode == "apps_script":
-                st.success(message)
-            else:
-                st.warning("Google Sheets -tallennus ei ollut käytössä tai epäonnistui, joten vastaukset tallennettiin paikallisesti.")
-                st.success(message)
-                saved_path = st.session_state.get("answers", {}).get("meta", {}).get("saved_path")
-                if saved_path and os.path.exists(saved_path):
-                    with open(saved_path, "rb") as f:
-                        st.download_button(
-                            "Lataa vastaukset (JSONL)",
-                            f,
-                            file_name=os.path.basename(saved_path),
-                            mime="application/jsonl",
-                        )
-            st.stop()
+                path = save_jsonl(st.session_state["answers"])
+                st.success(f"Kiitos! Vastaukset tallennettu tiedostoon: {path}")
+                st.session_state["answers"]["meta"]["saved_path"] = path
+                with open(path, "rb") as f:
+                    st.download_button(
+                        "Lataa vastaukset (JSONL)",
+                        f,
+                        file_name=os.path.basename(path),
+                        mime="application/jsonl",
+                    )
+                st.stop()
 
         st.session_state["page_idx"] += 1
         scroll_to_top()
