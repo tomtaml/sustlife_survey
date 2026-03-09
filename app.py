@@ -9,7 +9,7 @@ from pathlib import Path
 import pandas as pd
 import streamlit as st
 
-st.set_page_config(page_title="Sustlife – Survey demo v2", layout="centered")
+st.set_page_config(page_title="Sustlife – Survey demo", layout="centered")
 
 st.markdown(
     """
@@ -21,25 +21,10 @@ st.markdown(
     unsafe_allow_html=True,
 )
 
-BASE_DIR = os.path.dirname(os.path.abspath(__file__)) if "__file__" in globals() else os.getcwd()
+BASE_DIR = os.path.dirname(os.path.abspath(__file__)) if "__file__" in globals() else "/mnt/data"
 DATA_DIR = os.path.join(BASE_DIR, "data")
 os.makedirs(DATA_DIR, exist_ok=True)
-
-
-def resolve_driver_path() -> str:
-    candidates = [
-        "Suslife_master_driver_v2_harmonized_vignettes.xlsx",
-        "Suslife_master_driver_v2_checked.xlsx",
-        "Suslife_master_driver.xlsx",
-    ]
-    for name in candidates:
-        path = os.path.join(BASE_DIR, name)
-        if os.path.exists(path):
-            return path
-    return os.path.join(BASE_DIR, "Suslife_master_driver.xlsx")
-
-
-DRIVER_XLSX = resolve_driver_path()
+DRIVER_XLSX = os.path.join(BASE_DIR, "Suslife_master_driver.xlsx")
 
 SHEET_ITEMS = "ITEMS"
 SHEET_SCALES = "SCALES"
@@ -390,22 +375,74 @@ def current_vignette(page_id: str):
     return pool[idx] if idx < len(pool) else None
 
 
-def extract_first_image_ref(md: str):
-    m = re.search(r"!\[[^\]]*\]\(([^)]+)\)", md or "")
-    return m.group(1).strip() if m else None
+def extract_first_image_ref(text: str):
+    if not text:
+        return None
+    t = str(text)
+
+    m = re.search(r'!\[[^\]]*\]\((/?media/\S+?\.(?:png|jpg|jpeg|webp))\)', t, flags=re.IGNORECASE)
+    if m:
+        return m.group(1)
+
+    m = re.search(r'(^|\s)(/?media/\S+?\.(?:png|jpg|jpeg|webp))', t, flags=re.IGNORECASE)
+    if m:
+        return m.group(2)
+
+    return None
 
 
 def render_markdown_with_media(md: str):
-    md = md or ""
-    img_ref = extract_first_image_ref(md)
-    txt = re.sub(r"!\[[^\]]*\]\([^)]+\)", "", md).strip()
-    if img_ref:
-        rel = img_ref.lstrip("/")
-        path = os.path.join(BASE_DIR, rel)
-        if os.path.exists(path):
-            st.image(path, use_container_width=True)
-    if txt:
-        st.markdown(txt)
+    if md is None:
+        return
+
+    lines = [ln.rstrip() for ln in str(md).splitlines()]
+    out_md_lines = []
+
+    img_re = re.compile(r'!\[[^\]]*\]\(([^)]+)\)')
+    direct_re = re.compile(r'^(?P<ref>/?media/\S+?\.(?:png|jpg|jpeg|webp))(?P<rest>\s+.*)?$', re.IGNORECASE)
+
+    for ln in lines:
+        stripped = ln.strip()
+        if not stripped:
+            out_md_lines.append(ln)
+            continue
+
+        m_direct = direct_re.match(stripped)
+        if m_direct:
+            ref = m_direct.group("ref")
+            rest = (m_direct.group("rest") or "").strip()
+            rel = ref.lstrip("/")
+            img_path = os.path.join(BASE_DIR, rel)
+            if os.path.exists(img_path):
+                st.image(img_path, use_container_width=True)
+            else:
+                st.warning(f"Kuvaa ei löytynyt: {ref}")
+            if rest:
+                out_md_lines.append(rest)
+            continue
+
+        m = img_re.search(stripped)
+        if m:
+            ref = m.group(1).strip()
+            if ref.lower().startswith(("/media/", "media/")) and any(
+                ref.lower().endswith(ext) for ext in (".png", ".jpg", ".jpeg", ".webp")
+            ):
+                rel = ref.lstrip("/")
+                img_path = os.path.join(BASE_DIR, rel)
+                if os.path.exists(img_path):
+                    st.image(img_path, use_container_width=True)
+                else:
+                    st.warning(f"Kuvaa ei löytynyt: {ref}")
+                cleaned = img_re.sub("", ln).strip()
+                if cleaned:
+                    out_md_lines.append(cleaned)
+                continue
+
+        out_md_lines.append(ln)
+
+    remaining = "\n".join(out_md_lines).strip()
+    if remaining:
+        st.markdown(remaining)
 
 
 def visible_item_rows(items_df: pd.DataFrame, item_ids: list[str]) -> pd.DataFrame:
@@ -530,12 +567,11 @@ def build_order_check(flow_df: pd.DataFrame) -> str:
         "## Expected order",
         *[f"{i+1}. {p}" for i, p in enumerate(expected)],
         "",
-        "## Actual order used in app_v2",
+        "## Actual order used in app",
         *[f"{i+1}. {p}" for i, p in enumerate(actual)],
         "",
         "## Status",
     ]
-
     if actual == expected:
         lines.append("Order matches the v2 target flow exactly.")
     else:
@@ -544,15 +580,12 @@ def build_order_check(flow_df: pd.DataFrame) -> str:
             if e != a:
                 lines.append(f"- First mismatch at position {i}: expected {e}, actual {a}")
                 break
-
         extra_expected = [p for p in expected if p not in actual]
         extra_actual = [p for p in actual if p not in expected]
-
         if extra_expected:
             lines.append(f"- Missing from actual: {', '.join(extra_expected)}")
         if extra_actual:
             lines.append(f"- Extra in actual: {', '.join(extra_actual)}")
-
     return "\n".join(lines)
 
 
@@ -561,8 +594,8 @@ def main():
     items_df, flow_df, vigs_df, model_df, scale_map, construct_label_map = load_driver(DRIVER_XLSX)
     order_check_md = build_order_check(flow_df)
 
-    st.title("Sustlife – Survey demo v2")
-    st.caption(f"v2: fixed driver loading, updated general construct order, vignette pages limited to VIG_CORE, and loaded workbook: {os.path.basename(DRIVER_XLSX)}")
+    st.title("Sustlife – Survey demo")
+    st.caption(f"Updated order, original vignette logic kept close to v1, workbook: {os.path.basename(DRIVER_XLSX)}")
 
     mode = st.sidebar.radio("Näkymä", ["Survey", "Vignettes – Plastic", "Vignettes – Biowaste"], index=0)
     with st.sidebar.expander("Order check report", expanded=False):
