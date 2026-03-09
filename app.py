@@ -10,7 +10,7 @@ import streamlit as st
 # =============================
 # Config
 # =============================
-st.set_page_config(page_title="Sustlife – Survey demo v1", layout="centered", initial_sidebar_state="collapsed")
+st.set_page_config(page_title="Sustlife – Survey demo v1", layout="centered")
 
 st.markdown(
     """
@@ -164,7 +164,7 @@ def load_driver(path: str):
         if lbl:
             construct_label_map[(cid, w)] = lbl
 
-    return items, flow, vigs, model, scale_map, construct_label_map
+        return items, flow, vigs, model, scale_map, construct_label_map
 
 
 def save_jsonl(payload: dict) -> str:
@@ -482,7 +482,13 @@ def render_construct_blocks_matrix(item_rows: pd.DataFrame, scale_map: dict, pag
         # Optional: remove DK
         values = [v for v in values if str(v) != "99" and "en osaa" not in labels.get(v, "").lower()]
 
-        # Keep pretest UI free of internal construct / abbreviation labels.
+        # title
+        label = (
+            construct_label_map.get((construct_id, waste))
+            or construct_label_map.get((construct_id, "NA"))
+            or construct_id
+        )
+
         with st.container(border=True):
             st.markdown(
                 "<div style='font-weight:600; margin-bottom:0.5rem;'>"
@@ -890,9 +896,9 @@ is_plastic_vignette_page = show_if == "LOOP_PLASTIC"
 is_bio_vignette_page = show_if == "LOOP_BIO"
 is_vignette_page = is_plastic_vignette_page or is_bio_vignette_page
 
-# st.sidebar.write("DEBUG page_id:", page_id)
-# st.sidebar.write("DEBUG tokens:", tokens)
-# st.sidebar.write("DEBUG driver:", DRIVER_XLSX)
+st.sidebar.write("DEBUG page_id:", page_id)
+st.sidebar.write("DEBUG tokens:", tokens)
+st.sidebar.write("DEBUG driver:", DRIVER_XLSX)
 
 # -----------------------------
 # Vignette pages
@@ -909,7 +915,7 @@ if is_vignette_page:
             pool_ids = [f"{v.get('vignette_id')}({v.get('arm_id')})" for v in pool]
         except Exception:
             pool_ids = []
-        # debug caption hidden in pretest mode
+        st.caption(f"DEBUG page_id={page_id} lane={lane} idx={idx} pool={pool_ids}")
 
         img_ref = extract_first_image_ref(str((context.get("vignette") or {}).get("text_fi","")))
         try:
@@ -924,7 +930,24 @@ if is_vignette_page:
         render_markdown_with_media(str((context.get("vignette") or {}).get("text_fi","")), BASE_DIR)
 
 
-    # QA vignette preview sidebar hidden in pretest mode
+    # QA: show vignette preview thumbnails + IDs in sidebar (helps verify mapping)
+    with st.sidebar.expander("Vignette previews (QA)", expanded=True):
+        pool = st.session_state.get("vignette_pool") or []
+        for i, v in enumerate(pool, start=1):
+            vid = v.get("vignette_id", "")
+            arm = v.get("arm_id", "")
+            wst = v.get("waste", "")
+            img_ref = extract_first_image_ref(str(v.get("text_fi", "")))
+            st.write(f"{i}. {vid} • {arm} • {wst}")
+            if img_ref:
+                rel = img_ref.lstrip("/")
+                img_path = os.path.join(BASE_DIR, rel)
+                if os.path.exists(img_path):
+                    st.image(img_path, caption=os.path.basename(rel), use_container_width=True)
+                else:
+                    st.caption(f"Missing: {img_path}")
+            else:
+                st.caption("No image ref found")
 
     # Select vignette for this page (and render it once).
     if str(page_id).startswith("PL_V") or str(page_id).startswith("BIO_V"):
@@ -1155,7 +1178,7 @@ else:
         st.session_state["page_idx"] += 1
         scroll_to_top()
         st.rerun()
-# st.sidebar.write("DEBUG items on page:", item_rows[["item_id", "response_type"]].to_dict("records"))
+st.sidebar.write("DEBUG items on page:", item_rows[["item_id", "response_type"]].to_dict("records"))
 
 # -----------------------------
 # Navigation
