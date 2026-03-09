@@ -1,31 +1,52 @@
 import json
 import os
 import random
-import re
 import uuid
 from datetime import datetime
-from pathlib import Path
 
 import pandas as pd
 import streamlit as st
 
-st.set_page_config(page_title="Sustlife – Survey demo", layout="centered")
+# =============================
+# Config
+# =============================
+st.set_page_config(page_title="Sustlife – Survey demo v1", layout="centered")
 
 st.markdown(
     """
     <style>
-    .sus-q {font-size: 1.02rem; font-weight: 600; margin: .25rem 0;}
-    .sus-block {margin-bottom: .65rem;}
+    /* Bigger statement text */
+    .suslife-q {
+    font-size: 1.05rem;
+    font-weight: 600;
+    line-height: 1.35;
+    margin: 0.2rem 0 0.2rem 0;
+    }
+
+    /* Tighten spacing between rows */
+    .suslife-row {
+    margin: 0.1rem 0 0.4rem 0;
+    }
     </style>
     """,
     unsafe_allow_html=True,
 )
 
-BASE_DIR = os.path.dirname(os.path.abspath(__file__)) if "__file__" in globals() else os.getcwd()
+BASE_DIR = os.path.dirname(os.path.abspath(__file__))
+
+def scroll_to_top():
+    """Best-effort scroll to top after navigation."""
+    try:
+        import streamlit.components.v1 as components
+        components.html("<script>window.parent.scrollTo(0,0);</script>", height=0)
+    except Exception:
+        pass
+
 DATA_DIR = os.path.join(BASE_DIR, "data")
 os.makedirs(DATA_DIR, exist_ok=True)
 
-def resolve_driver_path() -> str:
+# Master driver workbook (keep in same folder as the app)
+def find_driver_workbook() -> str:
     candidates = [
         "Suslife_master_driver_v2_harmonized_vignettes.xlsx",
         "Suslife_master_driver_v2_checked.xlsx",
@@ -37,74 +58,75 @@ def resolve_driver_path() -> str:
             return path
     return os.path.join(BASE_DIR, "Suslife_master_driver.xlsx")
 
-DRIVER_XLSX = resolve_driver_path()
+DRIVER_XLSX = find_driver_workbook()
 
+# Sheet names (fixed in the starter template)
 SHEET_ITEMS = "ITEMS"
 SHEET_SCALES = "SCALES"
 SHEET_MODEL = "MODEL"
 SHEET_FLOW = "FLOW"
 SHEET_VIGNETTES = "VIGNETTES"
 
-VIG_CORE_ITEMS = ["ACC", "SUP", "IMPACT", "QUALITY", "REACT", "FRICTION"]
 
-SPEC_FLOW_ORDER = [
-    "P0_CONSENT",
-    "P1_WASTE_ROLE",
-    "P2_CONTEXT",
-    "P3_ANCHORS",
-    "P3B_BG",
-    "INTRO_PL",
-    "P4_PLASTIC_CORE",
-    "P5_PLASTIC_BARR",
-    "PL_V1",
-    "PL_V2",
-    "PL_V3",
-    "PL_FINAL",
-    "INTRO_BIO",
-    "P6_BIO_CORE",
-    "BIO_V1",
-    "BIO_V2",
-    "BIO_V3",
-    "BIO_FINAL",
-    "P7A_ATT",
-    "P7B_NORMS_SKILL",
-    "P7C_PERSONAL_ID",
-    "P7D_PLAN_NORMEXP",
-    "P7E_NFC",
-    "P7F_VALUES",
-    "P7G_REACT",
-    "P8_INFOCHECK",
-    "P8B_INFRA",
-    "P9_END",
-]
+# =============================
+# Helpers
+# =============================
+def route_stratum(area_type: str, housing: str) -> str:
+    """Maps area + housing to MGA_GROUP (7 groups).
+    No rural apartments or rural row houses. If encountered, fallback to small city group
+    so the demo remains navigable (fieldwork should screen out).
+    """
+    # Normalize labels (in case scales are decoded)
+    a = str(area_type).strip()
+    h = str(housing).strip()
 
+    # Area buckets (based on AREA_TYPES labels)
+    if "urban" in a.lower() or "suuren" in a.lower():
+        area = "US"
+    elif "taajama" in a.lower() or "pienempi" in a.lower():
+        area = "SC"
+    else:
+        area = "RU"
 
-def scroll_to_top():
-    try:
-        import streamlit.components.v1 as components
-        components.html("<script>window.parent.scrollTo(0,0);</script>", height=0)
-    except Exception:
-        pass
+    # Housing buckets
+    if "kerrostalo" in h.lower():
+        hh = "APT"
+    elif "rivitalo" in h.lower() or "paritalo" in h.lower():
+        hh = "ROW"
+    else:
+        hh = "DET"
+
+    # Apply constraints
+    if area == "RU" and hh in ("APT", "ROW"):
+        area = "SC"  # fallback for demo
+
+    return f"{hh}_{area}"
 
 
 def init_state():
     st.session_state.setdefault("respondent_id", str(uuid.uuid4()))
     st.session_state.setdefault("page_idx", 0)
-    st.session_state.setdefault("answers", {"meta": {}, "pages": {}, "vignettes": [], "final": {}})
+    st.session_state.setdefault("answers", {"meta": {}, "core": {}, "vignettes": [], "final": {}})
     st.session_state.setdefault("stratum", None)
+
+    # Vignette pools (3 plastic + 3 bio)
     st.session_state.setdefault("plastic_pool", [])
     st.session_state.setdefault("bio_pool", [])
+    st.session_state.setdefault("vignette_pool", [])
+    st.session_state.setdefault("plastic_pos", 0)
+    st.session_state.setdefault("bio_pos", 0)
+    st.session_state.setdefault("vignette_pos", 0)  # legacy compatibility
+
+    # Current page id (used for dynamic ranking options)
     st.session_state.setdefault("current_page_id", "")
-
-
-def normalize_str(x):
-    return "" if pd.isna(x) else str(x).strip()
 
 
 @st.cache_data(show_spinner=False)
 def load_driver(path: str):
     if not os.path.exists(path):
-        raise FileNotFoundError(f"Driver workbook not found: {path}")
+        raise FileNotFoundError(
+            f"Driver workbook not found: {path}. Place Suslife_master_driver.xlsx next to app_v2.py."
+        )
 
     items = pd.read_excel(path, sheet_name=SHEET_ITEMS)
     scales = pd.read_excel(path, sheet_name=SHEET_SCALES)
@@ -112,240 +134,58 @@ def load_driver(path: str):
     flow = pd.read_excel(path, sheet_name=SHEET_FLOW)
     vigs = pd.read_excel(path, sheet_name=SHEET_VIGNETTES)
 
+    # Normalize blanks
     for df in (items, scales, model, flow, vigs):
-        df.columns = [normalize_str(c) for c in df.columns]
+        df.columns = [str(c).strip() for c in df.columns]
+    items["item_id"] = items["item_id"].astype(str).str.strip()
+    items["construct_id"] = items["construct_id"].astype(str).str.strip()
+    items["response_type"] = items["response_type"].astype(str).str.strip()
+    items["scale_id"] = items["scale_id"].astype(str).str.strip()
 
-    for c in ["item_id", "construct_id", "waste", "response_type", "scale_id", "question_fi", "help_fi", "tags"]:
-        if c in items.columns:
-            items[c] = items[c].map(normalize_str)
-    for c in ["page_id", "title_fi", "show_if", "items", "notes"]:
-        if c in flow.columns:
-            flow[c] = flow[c].map(normalize_str)
-    for c in ["vignette_id", "stratum", "waste", "text_fi", "title_fi", "arm_id", "constructs_to_show_items"]:
-        if c in vigs.columns:
-            vigs[c] = vigs[c].map(normalize_str)
-    for c in ["construct_id", "waste", "construct_label_fi", "item_id"]:
-        if c in model.columns:
-            model[c] = model[c].map(normalize_str)
+    flow["page_id"] = flow["page_id"].astype(str).str.strip()
+    flow["show_if"] = flow["show_if"].fillna("").astype(str).str.strip()
+    flow["items"] = flow["items"].fillna("").astype(str)
+    flow["title_fi"] = flow["title_fi"].fillna("").astype(str)
 
-    # Build scale map.
+    vigs["vignette_id"] = vigs["vignette_id"].astype(str).str.strip()
+    vigs["stratum"] = vigs["stratum"].astype(str).str.strip()
+    vigs["waste"] = vigs["waste"].astype(str).str.strip()
+    vigs["mech_ids"] = vigs["mech_ids"].fillna("").astype(str)
+
+    # Scale map: scale_id -> list[(value,label)]
     scales = scales.sort_values(["scale_id", "order"], kind="stable")
     scale_map = {}
-    for sid, g in scales.groupby("scale_id", dropna=False):
-        sid = normalize_str(sid)
+    for sid, g in scales.groupby("scale_id"):
         opts = []
         for _, r in g.iterrows():
-            opts.append((r["option_value"], normalize_str(r.get("option_label_fi", ""))))
-        scale_map[sid] = opts
+            opts.append((r["option_value"], str(r["option_label_fi"])))
+        scale_map[str(sid).strip()] = opts
 
-    # Programmatic additions from updated v3 spec.
-    items = patch_items_for_v2(items)
-    model = patch_model_for_v2(model)
-    flow = patch_flow_for_v2(flow)
+    # --- Construct label map from MODEL ---
+    # Prefer waste-specific labels; fallback to NA if no waste match is provided.
+    model["construct_id"] = model["construct_id"].astype(str).str.strip()
+    model["waste"] = model["waste"].fillna("NA").astype(str).str.strip()
+    model["construct_label_fi"] = model["construct_label_fi"].fillna("").astype(str).str.strip()
 
+    # store per (construct_id, waste)
     construct_label_map = {}
-    mdl = model.copy()
-    mdl["waste"] = mdl["waste"].replace({"": "NA"}).fillna("NA")
-    for _, r in mdl.drop_duplicates(subset=["construct_id", "waste"]).iterrows():
-        cid = normalize_str(r["construct_id"])
-        waste = normalize_str(r["waste"]) or "NA"
-        lbl = normalize_str(r.get("construct_label_fi", ""))
-        if cid and lbl:
-            construct_label_map[(cid, waste)] = lbl
+    for _, r in model.drop_duplicates(subset=["construct_id", "waste"]).iterrows():
+        cid = r["construct_id"]
+        w = r["waste"] or "NA"
+        lbl = r["construct_label_fi"]
+        if lbl:
+            construct_label_map[(cid, w)] = lbl
 
     return items, flow, vigs, model, scale_map, construct_label_map
 
 
-def append_if_missing(df: pd.DataFrame, key_col: str, rows: list[dict]) -> pd.DataFrame:
-    existing = set(df[key_col].astype(str)) if key_col in df.columns else set()
-    add = [r for r in rows if str(r[key_col]) not in existing]
-    if not add:
-        return df
-    return pd.concat([df, pd.DataFrame(add)], ignore_index=True)
-
-
-def patch_items_for_v2(items: pd.DataFrame) -> pd.DataFrame:
-    base_cols = list(items.columns)
-    def row(**kwargs):
-        out = {c: "" for c in base_cols}
-        out.update(kwargs)
-        return out
-
-    additions = [
-        row(item_id="PL_ANCHOR_OE", construct_id="PL_ANCHOR", waste="plastic", response_type="text", scale_id="FREE_TEXT",
-            question_fi="Jos arvion mukaan alle 80 % muovipakkauksista tulee lajiteltua: Millaiset muovipakkaukset päätyvät teillä tyypillisesti sekajätteeseen, ja miksi?",
-            help_fi="Avoin vastaus. Kerro konkreettisia esimerkkejä.", reverse=0, required=0, tags="core"),
-        row(item_id="BIO_ANCHOR_OE", construct_id="BIO_ANCHOR", waste="bio", response_type="text", scale_id="FREE_TEXT",
-            question_fi="Jos arvion mukaan alle 80 % biojätteestä tulee lajiteltua: Millainen biojäte päätyy teillä tyypillisesti sekajätteeseen, ja miksi?",
-            help_fi="Avoin vastaus. Kerro konkreettisia esimerkkejä.", reverse=0, required=0, tags="core"),
-
-        row(item_id="PERSONAL_NORM1", construct_id="PERSONAL_NORM", waste="", response_type="radio", scale_id="LIKERT_1_5",
-            question_fi="Koen, että minulla on henkilökohtainen velvollisuus lajitella jätteet huolellisesti.", reverse=0, required=1, tags="core"),
-        row(item_id="PERSONAL_NORM2", construct_id="PERSONAL_NORM", waste="", response_type="radio", scale_id="LIKERT_1_5",
-            question_fi="Tuntisin toimivani väärin, jos en lajittelisi jätteitä silloin kun se on mahdollista.", reverse=0, required=1, tags="core"),
-        row(item_id="PERSONAL_NORM3", construct_id="PERSONAL_NORM", waste="", response_type="radio", scale_id="LIKERT_1_5",
-            question_fi="Jätteiden lajittelu on minulle moraalisesti oikea tapa toimia.", reverse=0, required=1, tags="core"),
-
-        row(item_id="SELF_IDENTITY1", construct_id="SELF_IDENTITY", waste="", response_type="radio", scale_id="LIKERT_1_5",
-            question_fi="Pidän itseäni ihmisenä, joka lajittelee jätteet huolellisesti.", reverse=0, required=1, tags="core"),
-        row(item_id="SELF_IDENTITY2", construct_id="SELF_IDENTITY", waste="", response_type="radio", scale_id="LIKERT_1_5",
-            question_fi="Jätteiden lajittelu kuuluu siihen, millainen ihminen haluan olla.", reverse=0, required=1, tags="core"),
-        row(item_id="SELF_IDENTITY3", construct_id="SELF_IDENTITY", waste="", response_type="radio", scale_id="LIKERT_1_5",
-            question_fi="On minulle tärkeää nähdä itseni ympäristövastuullisena toimijana.", reverse=0, required=1, tags="core"),
-
-        row(item_id="PLAN_CTRL1", construct_id="PLAN_CTRL", waste="", response_type="radio", scale_id="LIKERT_1_5",
-            question_fi="Minulla on selkeä suunnitelma siitä, milloin vien lajitellut jätteet eteenpäin.", reverse=0, required=1, tags="core"),
-        row(item_id="PLAN_CTRL2", construct_id="PLAN_CTRL", waste="", response_type="radio", scale_id="LIKERT_1_5",
-            question_fi="Tiedän etukäteen, miten toimin, vaikka arjessa olisi kiire.", reverse=0, required=1, tags="core"),
-        row(item_id="PLAN_CTRL3", construct_id="PLAN_CTRL", waste="", response_type="radio", scale_id="LIKERT_1_5",
-            question_fi="Jos lajittelutilanne tulee yllättäen, minulla on valmis toimintatapa.", reverse=0, required=1, tags="core"),
-
-        row(item_id="NORM_EXP_G1", construct_id="NORM_EXP_G", waste="", response_type="radio", scale_id="LIKERT_1_5",
-            question_fi="Näen usein, että muut ihmiset lajittelevat jätteitä omalla alueellani.", reverse=0, required=1, tags="core"),
-        row(item_id="NORM_EXP_G2", construct_id="NORM_EXP_G", waste="", response_type="radio", scale_id="LIKERT_1_5",
-            question_fi="Taloyhtiössäni tai naapurustossani lajittelu on näkyvä ja tavallinen käytäntö.", reverse=0, required=1, tags="core"),
-        row(item_id="NORM_EXP_G3", construct_id="NORM_EXP_G", waste="", response_type="radio", scale_id="LIKERT_1_5",
-            question_fi="Lähipiirissäni jätteiden lajittelu on yleistä.", reverse=0, required=1, tags="core"),
-    ]
-    return append_if_missing(items, "item_id", additions)
-
-
-def patch_model_for_v2(model: pd.DataFrame) -> pd.DataFrame:
-    base_cols = list(model.columns)
-    def row(**kwargs):
-        out = {c: "" for c in base_cols}
-        out.update(kwargs)
-        return out
-
-    additions = [
-        row(construct_id="PERSONAL_NORM", waste="", construct_label_fi="Henkilökohtainen velvollisuus", model_type="reflective", score_rule="mean", item_id="PERSONAL_NORM1", weight=1, reverse=0),
-        row(construct_id="SELF_IDENTITY", waste="", construct_label_fi="Lajittelijaidentiteetti", model_type="reflective", score_rule="mean", item_id="SELF_IDENTITY1", weight=1, reverse=0),
-        row(construct_id="PLAN_CTRL", waste="", construct_label_fi="Suunnittelu / action control", model_type="reflective", score_rule="mean", item_id="PLAN_CTRL1", weight=1, reverse=0),
-        row(construct_id="NORM_EXP_G", waste="", construct_label_fi="Lajittelun näkyvyys lähiympäristössä", model_type="reflective", score_rule="mean", item_id="NORM_EXP_G1", weight=1, reverse=0),
-    ]
-    return append_if_missing(model, "item_id", additions)
-
-
-def patch_flow_for_v2(flow: pd.DataFrame) -> pd.DataFrame:
-    flow = flow.copy()
-    flow["page_id"] = flow["page_id"].astype(str)
-
-    # Fix typo in workbook and reduce vignette pages to VIG_CORE only.
-    flow.loc[flow["page_id"] == "INTRO_BIO", "items"] = "INTRO_BIO"
-    for pid in ["PL_V1", "PL_V2", "PL_V3", "BIO_V1", "BIO_V2", "BIO_V3"]:
-        flow.loc[flow["page_id"] == pid, "items"] = "|".join(VIG_CORE_ITEMS)
-
-    # Rename/reshape general construct pages to match updated spec order.
-    replace_map = {
-        "P7C_NFC": {
-            "page_id": "P7C_PERSONAL_ID",
-            "title_fi": "Henkilökohtainen velvollisuus ja identiteetti",
-            "show_if": "",
-            "items": "PERSONAL_NORM1|PERSONAL_NORM2|PERSONAL_NORM3|SELF_IDENTITY1|SELF_IDENTITY2|SELF_IDENTITY3",
-            "page_break": 1,
-            "randomize_items_within_page": 0,
-            "notes": "Added in v2 from programming spec",
-        },
-        "P7D_VALUES": {
-            "page_id": "P7D_PLAN_NORMEXP",
-            "title_fi": "Suunnittelu ja lajittelun näkyvyys",
-            "show_if": "",
-            "items": "PLAN_CTRL1|PLAN_CTRL2|PLAN_CTRL3|NORM_EXP_G1|NORM_EXP_G2|NORM_EXP_G3",
-            "page_break": 1,
-            "randomize_items_within_page": 0,
-            "notes": "Added in v2 from programming spec",
-        },
-        "P7E_REACT": {
-            "page_id": "P7E_NFC",
-            "title_fi": "Mieltymykset selkeyteen",
-            "show_if": "",
-            "items": "INSTR_NFC_G|NFC_G1|NFC_G2|NFC_G3|NFC_G4|NFC_G5|NFC_G6",
-            "page_break": 1,
-            "randomize_items_within_page": 0,
-            "notes": "Moved later to match v3 spec",
-        },
-    }
-    for old_pid, vals in replace_map.items():
-        idx = flow.index[flow["page_id"] == old_pid]
-        if len(idx):
-            for k, v in vals.items():
-                flow.loc[idx[0], k] = v
-
-    # Append missing values + react pages.
-    extra_pages = pd.DataFrame([
-        {
-            "page_id": "P7F_VALUES",
-            "title_fi": "Arvot",
-            "show_if": "",
-            "items": "INSTR_VALUES|VAL_BIOS1|VAL_BIOS2|VAL_BIOS3|VAL_BIOS4|VAL_ALTR1|VAL_ALTR2|VAL_ALTR3|VAL_ALTR4|VAL_EGO1|VAL_EGO2|VAL_EGO3|VAL_HED1|VAL_HED2",
-            "page_break": 1,
-            "randomize_items_within_page": 0,
-            "notes": "Moved later to match v3 spec",
-        },
-        {
-            "page_id": "P7G_REACT",
-            "title_fi": "Yleinen suhtautuminen ohjaamiseen",
-            "show_if": "",
-            "items": "REACT",
-            "page_break": 1,
-            "randomize_items_within_page": 0,
-            "notes": "Moved later to match v3 spec",
-        },
-    ])
-    missing = [p for p in extra_pages["page_id"] if p not in set(flow["page_id"])]
-    if missing:
-        flow = pd.concat([flow, extra_pages[extra_pages["page_id"].isin(missing)]], ignore_index=True)
-
-    # Reorder to updated spec order.
-    rank = {pid: i for i, pid in enumerate(SPEC_FLOW_ORDER)}
-    flow["_ord"] = flow["page_id"].map(lambda x: rank.get(str(x), 999))
-    flow = flow.sort_values(["_ord", "page_id"], kind="stable").drop(columns=["_ord"]).reset_index(drop=True)
-    return flow
-
-
-def parse_items_list(s: str):
-    return [x.strip() for x in str(s).split("|") if x and str(x).strip()]
-
-
-def make_item_key(page_id: str, item_id: str):
-    return f"{page_id}__{item_id}"
-
-
-def get_scale_options(scale_map: dict, scale_id: str):
-    return scale_map.get(normalize_str(scale_id), [])
-
-
-def get_label_for_value(scale_map: dict, scale_id: str, value):
-    for v, lbl in get_scale_options(scale_map, scale_id):
-        try:
-            if float(v) == float(value):
-                return lbl
-        except Exception:
-            if str(v) == str(value):
-                return lbl
-    return str(value)
-
-
-def route_stratum(area_type, housing):
-    a = str(area_type).lower()
-    h = str(housing).lower()
-    if "urban" in a or "suuren" in a or "lähiö" in a or a == "1" or a == "2":
-        area = "US"
-    elif "taajama" in a or "pieni" in a or a == "3" or a == "4":
-        area = "SC"
-    else:
-        area = "RU"
-
-    if "kerrostalo" in h or h == "1":
-        hh = "APT"
-    elif "rivi" in h or "pari" in h or h == "2":
-        hh = "ROW"
-    else:
-        hh = "DET"
-
-    if area == "RU" and hh in {"APT", "ROW"}:
-        area = "SC"
-    return f"{hh}_{area}"
+def save_jsonl(payload: dict) -> str:
+    ts = datetime.now().strftime("%Y%m%d_%H%M%S")
+    filename = f"suslife_v2_{ts}_{st.session_state['respondent_id'][:8]}.jsonl"
+    path = os.path.join(DATA_DIR, filename)
+    with open(path, "a", encoding="utf-8") as f:
+        f.write(json.dumps(payload, ensure_ascii=False) + "\n")
+    return path
 
 
 def get_state_ending(suffix: str):
@@ -354,26 +194,28 @@ def get_state_ending(suffix: str):
             return v
     return None
 
+def get_answer_value(item_id: str):
+    # Prefer current widget state, then persisted answers
+    v = get_state_ending("_" + item_id)
+    if v is not None:
+        return v
+    meta = st.session_state.get("answers", {}).get("meta", {})
+    core = st.session_state.get("answers", {}).get("core", {})
+    final = st.session_state.get("answers", {}).get("final", {})
+    for bucket in (meta, core, final):
+        if item_id in bucket and bucket[item_id] is not None:
+            return bucket[item_id]
+    return None
 
-def resolve_stratum(scale_map):
-    area = st.session_state.get(make_item_key("P2_CONTEXT", "AREA_TYPE"))
-    housing = st.session_state.get(make_item_key("P2_CONTEXT", "HOUSING"))
-    if area is None or housing is None:
-        return None
-    area_label = get_label_for_value(scale_map, "AREA_TYPES", area)
-    housing_label = get_label_for_value(scale_map, "HOUSING_TYPES", housing)
-    return route_stratum(area_label, housing_label)
-
-
-def ensure_vignette_pools(vigs_df, scale_map):
-    """Initialize stratum + plastic_pool (3) + bio_pool (3), staying close to the original app logic."""
+def ensure_vignette_pool(flow_df: pd.DataFrame, vigs_df: pd.DataFrame, scale_map: dict):
+    """Initialize stratum + plastic_pool (3) + bio_pool (3), enforcing uniqueness."""
     if st.session_state.get("plastic_pool") and st.session_state.get("bio_pool"):
         return
 
-    area = get_state_ending("_AREA_TYPE")
-    housing = get_state_ending("_HOUSING")
-    compost = get_state_ending("_COMPOST")
-    bio_anchor = get_state_ending("_BIO_SORT_ANCHOR")
+    area = get_answer_value("AREA_TYPE")
+    housing = get_answer_value("HOUSING")
+    compost = get_answer_value("COMPOST")
+    bio_anchor = get_answer_value("BIO_SORT_ANCHOR")
 
     if area is None or housing is None:
         return
@@ -404,49 +246,54 @@ def ensure_vignette_pools(vigs_df, scale_map):
 
     pool = pool[pool["stratum"].astype(str) == stratum]
 
+    # Drop exact duplicates robustly (some Excel exports can duplicate rows)
     dedup_cols = [c for c in ["vignette_id", "arm_id", "waste", "stratum", "text_fi"] if c in pool.columns]
     if dedup_cols:
         pool = pool.drop_duplicates(subset=dedup_cols, keep="first")
     if "vignette_id" in pool.columns:
         pool = pool.drop_duplicates(subset=["vignette_id"], keep="first")
 
+    # Active composter override for bio (drop service/start arms)
     is_active_composter = False
     try:
-        is_compost = compost in (1, "1", True, "Kyllä", "kyllä")
-        is_active_bio = bio_anchor in (1, "1", 2, "2")
+        is_compost = (compost in (1, "1", True, "Kyllä", "kyllä"))
+        is_active_bio = (bio_anchor in (1, "1", 2, "2"))
         is_active_composter = bool(is_compost and is_active_bio)
     except Exception:
         is_active_composter = False
 
     def pick_unique(df, n=3):
+        """Pick up to n unique vignettes preferring unique arm_id then vignette_id."""
         if df.empty:
             return []
+        # Shuffle rows
         rows = df.to_dict("records")
         random.shuffle(rows)
-        picked = []
-        seen_vid = set()
-        seen_arm = set()
+
+        picked=[]
+        seen_vid=set()
+        seen_arm=set()
+        # Pass 1: enforce unique arm_id + vignette_id
         for r in rows:
-            vid = str(r.get("vignette_id", ""))
-            arm = str(r.get("arm_id", ""))
+            vid=str(r.get("vignette_id",""))
+            arm=str(r.get("arm_id",""))
             if vid and vid in seen_vid:
                 continue
             if arm and arm in seen_arm:
                 continue
             picked.append(r)
-            if vid:
-                seen_vid.add(vid)
-            if arm:
-                seen_arm.add(arm)
+            if vid: seen_vid.add(vid)
+            if arm: seen_arm.add(arm)
             if len(picked) >= n:
                 return picked
+
+        # Pass 2: relax arm uniqueness, keep vignette_id uniqueness
         for r in rows:
-            vid = str(r.get("vignette_id", ""))
+            vid=str(r.get("vignette_id",""))
             if vid and vid in seen_vid:
                 continue
             picked.append(r)
-            if vid:
-                seen_vid.add(vid)
+            if vid: seen_vid.add(vid)
             if len(picked) >= n:
                 break
         return picked[:n]
@@ -456,25 +303,149 @@ def ensure_vignette_pools(vigs_df, scale_map):
 
     bio_df = pool[pool["waste"].astype(str) == "bio"]
     if is_active_composter and "arm_id" in bio_df.columns:
-        bio_df = bio_df[~bio_df["arm_id"].astype(str).isin({"BioA10", "BioA11"})]
+        drop_arms = {"BioA10", "BioA11"}
+        bio_df = bio_df[~bio_df["arm_id"].astype(str).isin(drop_arms)]
     bio = pick_unique(bio_df, n=3)
+
+    # If still short, show a visible warning (but keep running)
+    if len(pl) < 3:
+        st.warning(f"Huom: Muovi‑tilannekuvia löytyi vain {len(pl)}/3 tälle ryhmälle ({stratum}). Lisää aktiivisia vignettes‑rivejä.")
+    if len(bio) < 3:
+        st.warning(f"Huom: Bio‑tilannekuvia löytyi vain {len(bio)}/3 tälle ryhmälle ({stratum}). Lisää aktiivisia vignettes‑rivejä.")
 
     st.session_state["plastic_pool"] = pl
     st.session_state["bio_pool"] = bio
     st.session_state["vignette_pool"] = pl + bio
+    st.session_state["plastic_pos"] = 0
+    st.session_state["bio_pos"] = 0
+    st.session_state["vignette_pos"] = 0  # legacy compatibility
+
+    st.session_state["answers"].setdefault("meta", {})
+    st.session_state["answers"]["meta"].update({
+        "AREA_TYPE": area,
+        "HOUSING": housing,
+        "COMPOST": compost,
+        "BIO_SORT_ANCHOR": bio_anchor,
+        "area_type": area,
+        "housing": housing,
+        "area_type_label": area_label,
+        "housing_label": housing_label,
+        "stratum": stratum,
+        "is_active_composter": is_active_composter,
+    })
+
+def parse_items_list(s: str):
+    # FLOW.items uses pipe separated values. Each token may be an item_id or a construct_id.
+    return [x.strip() for x in str(s).split("|") if x.strip()]
 
 
-def current_vignette(page_id: str):
-    m = re.search(r"(PL|BIO)_V(\d+)", page_id)
-    if not m:
-        return None
-    waste = "plastic" if m.group(1) == "PL" else "bio"
-    idx = int(m.group(2)) - 1
-    pool = st.session_state.get("plastic_pool", []) if waste == "plastic" else st.session_state.get("bio_pool", [])
-    return pool[idx] if idx < len(pool) else None
+def get_item_rows(items_df: pd.DataFrame, tokens: list[str]):
+    """
+    tokens are the page's "items" from FLOW, which can reference:
+      - item_id (single item)
+      - construct_id (include all items under the construct)
+    """
+    parts = []
+    construct_ids = set(items_df["construct_id"].unique())
+    for t in tokens:
+        if t in construct_ids:
+            parts.append(items_df[items_df["construct_id"] == t])
+        else:
+            parts.append(items_df[items_df["item_id"] == t])
+    if not parts:
+        return items_df.iloc[0:0]
+    out = pd.concat(parts, axis=0, ignore_index=True)
+    return out
+
+
+def maybe_shuffle_item_rows(item_rows: pd.DataFrame, enabled: bool) -> pd.DataFrame:
+    if not enabled or len(item_rows) <= 1:
+        return item_rows
+    # Stable random shuffle
+    idx = list(range(len(item_rows)))
+    random.shuffle(idx)
+    return item_rows.iloc[idx].reset_index(drop=True)
+
+import re
+
+def render_markdown_with_media(md: str, base_dir: str):
+    """
+    Renders markdown that may include image references pointing to local files.
+    Supported image syntaxes:
+      1) A line that is just a path: /media/intro.png  (or media/intro.png)
+      2) Markdown image: ![alt](/media/intro.png)
+      3) Markdown image: ![alt](media/intro.png)
+
+    Any found images are shown in-place, and the remaining text is rendered via st.markdown().
+    """
+    if md is None:
+        return
+
+    lines = [ln.rstrip() for ln in str(md).splitlines()]
+    out_md_lines = []
+
+    # regex for markdown image syntax
+    img_re = re.compile(r"!\[[^\]]*\]\(([^)]+)\)")
+
+    for ln in lines:
+        stripped = ln.strip()
+        if not stripped:
+            out_md_lines.append(ln)
+            continue
+
+        # Case 1: line begins with a direct path (optionally followed by text)
+        # Supports both:
+        #   "/media/x.png"
+        #   "/media/x.png some explanatory text..."
+        direct_re = re.compile(r'^(?P<ref>/?media/\S+?\.(?:png|jpg|jpeg|webp))(?P<rest>\s+.*)?$', re.IGNORECASE)
+
+        m_direct = direct_re.match(stripped)
+        if m_direct:
+            ref = m_direct.group("ref")
+            rest = (m_direct.group("rest") or "").strip()
+
+            rel = ref.lstrip("/")  # "/media/x.png" -> "media/x.png"
+            img_path = os.path.join(base_dir, rel)
+            if os.path.exists(img_path):
+                st.image(img_path, use_container_width=True)
+            else:
+                st.warning(f"Kuvaa ei löytynyt: {ref} (polku: {img_path})")
+
+            # If the same line also contains text, keep it
+            if rest:
+                out_md_lines.append(rest)
+            continue
+
+        # Case 2/3: markdown image ![](...)
+        m = img_re.search(stripped)
+        if m:
+            ref = m.group(1).strip()
+            if ref.lower().startswith(("/media/", "media/")) and any(
+                ref.lower().endswith(ext) for ext in (".png", ".jpg", ".jpeg", ".webp")
+            ):
+                rel = ref.lstrip("/")
+                img_path = os.path.join(base_dir, rel)
+                if os.path.exists(img_path):
+                    st.image(img_path, use_container_width=True)
+                else:
+                    st.warning(f"Kuvaa ei löytynyt: {ref} (polku: {img_path})")
+                # remove the image markdown from the line (in case there's text too)
+                cleaned = img_re.sub("", ln).strip()
+                if cleaned:
+                    out_md_lines.append(cleaned)
+                continue
+
+        # Default: keep line for markdown rendering
+        out_md_lines.append(ln)
+
+    # Render remaining markdown (non-image content)
+    remaining = "\n".join(out_md_lines).strip()
+    if remaining:
+        st.markdown(remaining)
 
 
 def extract_first_image_ref(text: str):
+    """Extract the first /media/... image reference from vignette text."""
     if not text:
         return None
     t = str(text)
@@ -490,160 +461,99 @@ def extract_first_image_ref(text: str):
     return None
 
 
-def render_markdown_with_media(md: str):
-    if md is None:
-        return
 
-    lines = [ln.rstrip() for ln in str(md).splitlines()]
-    out_md_lines = []
+def lane_index_from_page_id(page_id: str):
+    """Return (lane, index0) for PL_Vn / BIO_Vn pages."""
+    pid = str(page_id).strip()
+    m = re.search(r"^PL_V\s*(\d+)\s*$", pid)
+    if m:
+        return "plastic", max(0, int(m.group(1)) - 1)
+    m = re.search(r"^BIO_V\s*(\d+)\s*$", pid)
+    if m:
+        return "bio", max(0, int(m.group(1)) - 1)
+    return None, 0
 
-    img_re = re.compile(r'!\[[^\]]*\]\(([^)]+)\)')
-    direct_re = re.compile(r'^(?P<ref>/?media/\S+?\.(?:png|jpg|jpeg|webp))(?P<rest>\s+.*)?$', re.IGNORECASE)
-
-    for ln in lines:
-        stripped = ln.strip()
-        if not stripped:
-            out_md_lines.append(ln)
-            continue
-
-        m_direct = direct_re.match(stripped)
-        if m_direct:
-            ref = m_direct.group("ref")
-            rest = (m_direct.group("rest") or "").strip()
-            rel = ref.lstrip("/")
-            img_path = os.path.join(BASE_DIR, rel)
-            if os.path.exists(img_path):
-                st.image(img_path, use_container_width=True)
-            else:
-                st.warning(f"Kuvaa ei löytynyt: {ref}")
-            if rest:
-                out_md_lines.append(rest)
-            continue
-
-        m = img_re.search(stripped)
-        if m:
-            ref = m.group(1).strip()
-            if ref.lower().startswith(("/media/", "media/")) and any(
-                ref.lower().endswith(ext) for ext in (".png", ".jpg", ".jpeg", ".webp")
-            ):
-                rel = ref.lstrip("/")
-                img_path = os.path.join(BASE_DIR, rel)
-                if os.path.exists(img_path):
-                    st.image(img_path, use_container_width=True)
-                else:
-                    st.warning(f"Kuvaa ei löytynyt: {ref}")
-                cleaned = img_re.sub("", ln).strip()
-                if cleaned:
-                    out_md_lines.append(cleaned)
-                continue
-
-        out_md_lines.append(ln)
-
-    remaining = "\n".join(out_md_lines).strip()
-    if remaining:
-        st.markdown(remaining)
-
-
-def visible_item_rows(items_df: pd.DataFrame, item_ids: list[str]) -> pd.DataFrame:
-    df = items_df[items_df["item_id"].isin(item_ids)].copy()
-    df["_ord"] = df["item_id"].map({iid: i for i, iid in enumerate(item_ids)})
-    return df.sort_values("_ord", kind="stable").drop(columns=["_ord"]) 
-
-
-def render_info(question: str):
-    render_markdown_with_media(question)
-    return True
-
-
-def render_scalar(item_row: pd.Series, page_id: str, scale_map: dict):
-    item_id = str(item_row["item_id"]).strip()
-    q = normalize_str(item_row.get("question_fi", ""))
-    response_type = normalize_str(item_row.get("response_type", "")).lower()
-    scale_id = normalize_str(item_row.get("scale_id", ""))
-    key = make_item_key(page_id, item_id)
-
-    if response_type in {"info", "markdown", "display", "intro"}:
-        render_markdown_with_media(q)
-        return True
-    if response_type == "checkbox":
-        return st.checkbox(q, key=key)
-    if response_type in {"text", "textarea", "open"}:
-        return st.text_area(q, key=key)
-    if response_type == "slider":
-        return st.slider(q, min_value=0, max_value=100, key=key)
-
-    if scale_id == "VIGNETTE_POOL":
-        pid = str(st.session_state.get("current_page_id", ""))
-        if pid.startswith("PL_"):
-            pool = st.session_state.get("plastic_pool", [])
-        elif pid.startswith("BIO_"):
-            pool = st.session_state.get("bio_pool", [])
-        else:
-            pool = st.session_state.get("vignette_pool", [])
-        options = [str(v.get("vignette_id", "")) for v in pool]
-        labels = {str(v.get("vignette_id", "")): f"{v.get('vignette_id')} – {v.get('title_fi', '')}" for v in pool}
-        if response_type == "rank_select":
-            return st.selectbox(q, options, key=key, format_func=lambda x: labels.get(x, x))
-        return st.radio(q, options, key=key, format_func=lambda x: labels.get(x, x), horizontal=False)
-
-    opts = get_scale_options(scale_map, scale_id)
-    values = [v for v, _ in opts]
-    labels = {v: l for v, l in opts}
-    if response_type == "select_one":
-        return st.selectbox(q, values, key=key, format_func=lambda x: labels.get(x, str(x)))
-
-    if response_type == "radio":
-        is_likert = str(scale_id).upper().startswith("LIKERT")
-        if is_likert:
-            return st.radio(q, values, key=key, horizontal=True, format_func=lambda x: str(x))
-        return st.radio(q, values, key=key, horizontal=False, format_func=lambda x: labels.get(x, str(x)))
-
-    return st.text_input(q, key=key)
-
-
-def render_construct_blocks_matrix(item_rows: pd.DataFrame, scale_map: dict, page_id: str, construct_label_map: dict):
+def get_vignette_for_page(page_id: str):
+    lane, idx = lane_index_from_page_id(page_id)
+    if lane == "plastic":
+        pool = st.session_state.get("plastic_pool", [])
+        return (pool[idx] if idx < len(pool) else None), lane, idx, pool
+    if lane == "bio":
+        pool = st.session_state.get("bio_pool", [])
+        return (pool[idx] if idx < len(pool) else None), lane, idx, pool
+    return None, None, 0, []
+def render_construct_blocks_matrix(item_rows: pd.DataFrame, scale_map: dict, page_id: str, context: dict):
     answers = {}
     if item_rows.empty:
         return answers
 
+    construct_label_map = context.get("construct_label_map", {})
+    waste = context.get("waste", "NA")
+
     for construct_id, g in item_rows.groupby("construct_id", sort=False):
         g = g.reset_index(drop=True)
+
         g_likert = g[
             g["scale_id"].astype(str).str.upper().str.startswith("LIKERT")
             & g["response_type"].astype(str).str.lower().isin(["radio", "likert"])
         ]
-        if len(g_likert) < 2:
+        if g_likert.empty:
             continue
 
         scale_id = str(g_likert.iloc[0]["scale_id"]).strip()
         if scale_id not in scale_map:
+            st.error(f"Puuttuva scale_id '{scale_id}' constructille {construct_id}.")
             continue
 
         opts = scale_map[scale_id]
         values = [v for v, _ in opts]
         labels = {v: str(lbl) for v, lbl in opts}
+
+        # Optional: remove DK
         values = [v for v in values if str(v) != "99" and "en osaa" not in labels.get(v, "").lower()]
 
-        label = construct_label_map.get((construct_id, "NA")) or construct_label_map.get((construct_id, "")) or construct_id
+        # title
+        label = (
+            construct_label_map.get((construct_id, waste))
+            or construct_label_map.get((construct_id, "NA"))
+            or construct_id
+        )
 
         with st.container(border=True):
             st.markdown(f"### {label}")
+            st.markdown(
+                "<div style='font-weight:600; margin-bottom:0.5rem;'>"
+                "Valitse kunkin väittämän kohdalla vaihtoehto, joka kuvaa mielipidettäsi parhaiten."
+                "</div>",
+                unsafe_allow_html=True,
+            )
+
+            # Header row: statement + numeric columns
             header_cols = st.columns([6] + [1] * len(values))
             header_cols[0].markdown("**Väittämä**")
             for j, v in enumerate(values):
                 header_cols[j + 1].markdown(f"**{v}**")
 
+            # Rows
             for _, r in g_likert.iterrows():
                 item_id = str(r["item_id"]).strip()
                 q = str(r.get("question_fi", "")).strip()
                 key = f"{page_id}_{item_id}"
 
-                row_cols = st.columns([6, len(values)])
+                # 1) statement column + 5 option columns (for alignment with header)
+                row_cols = st.columns([6] + [1] * len(values))
+
                 row_cols[0].markdown(
-                    f"<div style='font-size:1.02rem; font-weight:500; line-height:1.35'>{q}</div>",
+                    f"<div style='font-size:1.05rem; font-weight:500; line-height:1.35'>{q}</div>",
                     unsafe_allow_html=True,
                 )
-                with row_cols[1]:
+
+                # 2) radio MUST be placed into a WIDE container, not into a single narrow column.
+                # We'll create a container spanning the option area by using a second columns() call
+                # with the same left width, and a wide right side.
+                radio_cols = st.columns([6, len(values)])   # right side is wide now
+
+                with radio_cols[1]:
                     answers[item_id] = st.radio(
                         "",
                         values,
@@ -653,225 +563,665 @@ def render_construct_blocks_matrix(item_rows: pd.DataFrame, scale_map: dict, pag
                         label_visibility="collapsed",
                     )
 
+            # anchors once per block
             if len(values) >= 3:
                 v_first = values[0]
                 v_mid = values[len(values) // 2]
                 v_last = values[-1]
                 c1, c2, c3 = st.columns(3)
-                c1.caption(f"{v_first} = {labels.get(v_first, '')}")
-                c2.caption(f"{v_mid} = {labels.get(v_mid, '')}")
-                c3.caption(f"{v_last} = {labels.get(v_last, '')}")
+                with c1:
+                    st.caption(f"{v_first} = {labels.get(v_first, '')}")
+                with c2:
+                    st.caption(f"{v_mid} = {labels.get(v_mid, '')}")
+                with c3:
+                    st.caption(f"{v_last} = {labels.get(v_last, '')}")
 
     return answers
 
+def validate_values_page(items_df: pd.DataFrame):
+    if str(st.session_state.get("current_page_id","")) != "P7D_VALUES":
+        return
+    val_ids = [iid for iid in items_df["item_id"].astype(str).tolist() if iid.startswith("VAL_")]
+    count7 = 0
+    for iid in val_ids:
+        v = get_state_ending("_" + iid)
+        try:
+            if v is not None and int(v) == 7:
+                count7 += 1
+        except Exception:
+            pass
+    if count7 > 2:
+        st.warning("Huom: Olet merkinnyt useamman kuin kaksi arvoa “Erittäin tärkeä” -tasolle. Ohjeen mukaan enintään kaksi arvoa tulisi valita tasolle 7.")
 
-def render_page_items(page_id: str, page_title: str, item_rows: pd.DataFrame, scale_map: dict, construct_label_map: dict):
-    answers = {}
+def values_exact_two_sevens(items_df: pd.DataFrame) -> bool:
+    if str(st.session_state.get("current_page_id","")) != "P7D_VALUES":
+        return True
+    val_ids = [iid for iid in items_df["item_id"].astype(str).tolist() if iid.startswith("VAL_")]
+    chosen = []
+    missing = []
+    for iid in val_ids:
+        v = get_state_ending("_" + iid)
+        if v is None:
+            missing.append(iid)
+        try:
+            if v is not None and int(v) == 7:
+                chosen.append(iid)
+        except Exception:
+            pass
+    if missing:
+        st.error("Vastaa kaikkiin arvoihin ennen jatkamista.")
+        return False
+    if len(chosen) != 2:
+        st.error("Valitse tasolle 7 (“Erittäin tärkeä”) täsmälleen kaksi arvoa. Muut arvot voit arvioida tasoille 1–6.")
+        return False
+    return True
 
-    answers.update(render_construct_blocks_matrix(item_rows, scale_map, page_id, construct_label_map))
+def render_item(item_row: pd.Series, context: dict, scale_map: dict):
+    """
+    Excel-driven rendering.
+    context may include:
+      - page_id
+      - waste: 'plastic'/'bio' (for vignette pages)
+      - vignette: dict for vignette pages
+      - vignette_pool: list of shown vignettes (for ranking/choice)
+    """
+    item_id = str(item_row["item_id"]).strip()
+    response_type = str(item_row["response_type"]).strip()
+    scale_id = str(item_row.get("scale_id", "")).strip()  # define early
 
-    for _, r in item_rows.iterrows():
-        item_id = str(r["item_id"]).strip()
-        if item_id in answers:
-            continue
-        answers[item_id] = render_scalar(r, page_id, scale_map)
+    # Normalize some legacy response_type values
+    rt = response_type.lower()
+    if rt == "single":
+        response_type = "select_one"
+    elif rt == "open":
+        response_type = "textarea"
+    elif rt == "likert":
+        response_type = "radio"
+        if not scale_id:
+            scale_id = "LIKERT_1_5"
+    elif rt in ("number", "numeric"):
+        response_type = "text"
 
-    if page_id == "P3_ANCHORS":
-        pl_anchor = st.session_state.get(make_item_key(page_id, "PL_SORT_ANCHOR"))
-        bio_anchor = st.session_state.get(make_item_key(page_id, "BIO_SORT_ANCHOR"))
-        if pl_anchor is not None:
-            answers["PL_SORT_SHARE"] = 100 - int(pl_anchor)
-        if bio_anchor is not None:
-            answers["BIO_SORT_SHARE"] = 100 - int(bio_anchor)
-        if pl_anchor is not None and int(pl_anchor) > 20:
-            answers["PL_ANCHOR_OE"] = st.text_area(
-                "Jos arvion mukaan alle 80 % muovipakkauksista tulee lajiteltua: Millaiset muovipakkaukset päätyvät teillä tyypillisesti sekajätteeseen, ja miksi?",
-                key=make_item_key(page_id, "PL_ANCHOR_OE"),
+    q = str(item_row.get("question_fi", "")).strip()
+    help_fi = item_row.get("help_fi", "")
+    help_fi = "" if pd.isna(help_fi) else str(help_fi).strip()
+
+    # ✅ Display-only blocks (intro text, instructions, etc.)
+    if str(response_type).lower() in ("info", "markdown", "display", "intro"):
+        if q:
+            render_markdown_with_media(q, BASE_DIR)  # <-- THIS is the change
+        if help_fi:
+            st.caption(help_fi)
+        return None
+
+    # Dynamic tweak: IMPACT becomes waste-specific inside vignette pages
+    if item_id == "IMPACT" and context.get("waste") in ("plastic", "bio"):
+        q = (
+            "Tämä lisäisi omaa muovipakkausten lajitteluani."
+            if context["waste"] == "plastic"
+            else "Tämä lisäisi omaa biojätteen lajitteluani."
+        )
+
+    # Key to avoid collisions
+    key = f"{context.get('page_id','P')}_{item_id}"
+    if context.get("vignette") is not None:
+        key = f"{context['vignette']['vignette_id']}_{item_id}"
+
+    # ----- Special cases -----
+    if response_type == "checkbox":
+        return st.checkbox(q, key=key, help=help_fi if help_fi else None)
+
+    if response_type in ("text", "textarea"):
+        return st.text_area(q, key=key, help=help_fi if help_fi else None)
+
+    # Vignette pool options (ranking / forced choice)
+    if scale_id == "VIGNETTE_POOL":
+        pid = str(st.session_state.get("current_page_id",""))
+        if pid.startswith("PL_"):
+            pool = st.session_state.get("plastic_pool", [])
+        elif pid.startswith("BIO_"):
+            pool = st.session_state.get("bio_pool", [])
+        else:
+            pool = st.session_state.get("vignette_pool", [])
+
+        if not pool:
+            st.warning("Vignette-vaihtoehtoja ei löytynyt (pool tyhjä).")
+            return None
+
+        opts = [str(v.get("vignette_id","")) for v in pool]
+        labels = {str(v.get("vignette_id","")): f"{v.get('vignette_id')} – {v.get('title_fi','')}" for v in pool}
+
+        if response_type == "rank_select":
+            return st.selectbox(q, opts, format_func=lambda x: labels.get(x, x), key=key)
+
+        if response_type == "radio":
+            return st.radio(q, opts, format_func=lambda x: labels.get(x, x), key=key, horizontal=False)
+
+    # ----- Slider -----
+    if response_type == "slider":
+        # Default 0-100, but allow override via help_fi like "min=0 max=100"
+        min_v, max_v = 0, 100
+        try:
+            mmin = re.search(r"min\s*=\s*(\d+)", str(help_fi))
+            mmax = re.search(r"max\s*=\s*(\d+)", str(help_fi))
+            if mmin:
+                min_v = int(mmin.group(1))
+            if mmax:
+                max_v = int(mmax.group(1))
+        except Exception:
+            pass
+        cur = st.session_state.get(key, None)
+        if cur is None:
+            cur = min_v
+        st.slider(q, min_value=min_v, max_value=max_v, value=int(cur), key=key, help=help_fi if help_fi else None)
+        return st.session_state.get(key)
+
+    # ----- Scale-driven cases -----
+    if response_type in ("select_one", "radio"):
+        if scale_id not in scale_map:
+            st.error(f"Puuttuva scale_id '{scale_id}' itemille {item_id}. Lisää se SCALES-tauluun.")
+            return None
+
+        opts = scale_map[scale_id]
+        values = [v for v, _ in opts]
+        labels = {v: lbl for v, lbl in opts}
+
+        if response_type == "select_one":
+            return st.selectbox(
+                q, values, format_func=lambda x: labels.get(x, str(x)),
+                key=key, help=help_fi if help_fi else None
             )
-        if bio_anchor is not None and int(bio_anchor) > 20:
-            answers["BIO_ANCHOR_OE"] = st.text_area(
-                "Jos arvion mukaan alle 80 % biojätteestä tulee lajiteltua: Millainen biojäte päätyy teillä tyypillisesti sekajätteeseen, ja miksi?",
-                key=make_item_key(page_id, "BIO_ANCHOR_OE"),
+
+        is_likert = str(scale_id).upper().startswith("LIKERT")
+
+        if is_likert and response_type == "radio":
+            with st.container():
+                st.markdown('<div class="suslife-statement">', unsafe_allow_html=True)
+                selected = st.radio(
+                    q,
+                    values,
+                    format_func=lambda x: str(x),
+                    key=key,
+                    help=help_fi if help_fi else None,
+                    horizontal=True,
+                )
+                st.markdown("</div>", unsafe_allow_html=True)
+                
+            # Show anchors only once per page+scale_id
+            shown = context.get("_shown_anchors")
+            anchor_key = f"{context.get('page_id','P')}::{scale_id}"
+            if isinstance(shown, set) and anchor_key not in shown:
+                shown.add(anchor_key)
+
+                if len(values) >= 3:
+                    v_first = values[0]
+                    v_mid = values[len(values) // 2]
+                    v_last = values[-1]
+                    c1, c2, c3 = st.columns(3)
+                    with c1:
+                        st.caption(f"{v_first} = {labels.get(v_first, '')}")
+                    with c2:
+                        st.caption(f"{v_mid} = {labels.get(v_mid, '')}")
+                    with c3:
+                        st.caption(f"{v_last} = {labels.get(v_last, '')}")
+
+            return selected
+
+        # Non-likert radios (e.g., frequency scales) -> vertical + bigger statement text
+        with st.container():
+            st.markdown('<div class="suslife-statement">', unsafe_allow_html=True)
+            out = st.radio(
+                q,
+                values,
+                format_func=lambda x: labels.get(x, str(x)),
+                key=key,
+                help=help_fi if help_fi else None,
+                horizontal=False,
             )
-
-    return answers
-
-
-def save_payload(payload: dict) -> str:
-    ts = datetime.now().strftime("%Y%m%d_%H%M%S")
-    filename = f"suslife_v2_{ts}_{st.session_state['respondent_id'][:8]}.json"
-    path = os.path.join(DATA_DIR, filename)
-    with open(path, "w", encoding="utf-8") as f:
-        json.dump(payload, f, ensure_ascii=False, indent=2)
-    return path
+            st.markdown("</div>", unsafe_allow_html=True)
+        return out
 
 
-def page_nav(flow_df):
-    st.markdown("---")
-    c1, c2, c3 = st.columns([1, 1, 2])
-    with c1:
-        if st.button("Takaisin", disabled=st.session_state["page_idx"] == 0):
-            st.session_state["page_idx"] = max(0, st.session_state["page_idx"] - 1)
-            scroll_to_top()
-            st.rerun()
-    with c2:
-        if st.button("Aloita alusta"):
-            for k in list(st.session_state.keys()):
-                del st.session_state[k]
-            scroll_to_top()
-            st.rerun()
-    with c3:
-        st.caption(f"Page {st.session_state['page_idx'] + 1}/{len(flow_df)} • Stratum: {st.session_state.get('stratum')}")
+# =============================
+# App
+# =============================
+init_state()
 
-
-def build_order_check(flow_df: pd.DataFrame) -> str:
-    expected = SPEC_FLOW_ORDER
-    actual = flow_df["page_id"].astype(str).tolist()
-    lines = [
-        "# Survey v2 order check",
-        "",
-        "## Expected order",
-        *[f"{i+1}. {p}" for i, p in enumerate(expected)],
-        "",
-        "## Actual order used in app",
-        *[f"{i+1}. {p}" for i, p in enumerate(actual)],
-        "",
-        "## Status",
-    ]
-    if actual == expected:
-        lines.append("Order matches the v2 target flow exactly.")
-    else:
-        lines.append("Order does not fully match target flow.")
-        for i, (e, a) in enumerate(zip(expected, actual), start=1):
-            if e != a:
-                lines.append(f"- First mismatch at position {i}: expected {e}, actual {a}")
-                break
-        extra_expected = [p for p in expected if p not in actual]
-        extra_actual = [p for p in actual if p not in expected]
-        if extra_expected:
-            lines.append(f"- Missing from actual: {', '.join(extra_expected)}")
-        if extra_actual:
-            lines.append(f"- Extra in actual: {', '.join(extra_actual)}")
-    return "\n".join(lines)
-
-
-def main():
-    init_state()
+try:
     items_df, flow_df, vigs_df, model_df, scale_map, construct_label_map = load_driver(DRIVER_XLSX)
-    order_check_md = build_order_check(flow_df)
+except Exception as e:
+    st.error(str(e))
+    st.stop()
 
-    st.title("Sustlife – Survey demo")
-    st.caption(f"Updated order with original-style vignette selection and horizontal Likert layout, workbook: {os.path.basename(DRIVER_XLSX)}")
+st.title("Sustlife – Survey demo v1")
+st.caption("Kaikki ohjautuu yhdestä Excelistä: ITEMS + SCALES + MODEL + FLOW + VIGNETTES.")
 
-    mode = st.sidebar.radio("Näkymä", ["Survey", "Vignettes – Plastic", "Vignettes – Biowaste"], index=0)
-    with st.sidebar.expander("Order check report", expanded=False):
-        st.markdown(order_check_md)
+mode = st.sidebar.radio(
+    "Näkymä",
+    ["Survey", "Vignettes – Plastic", "Vignettes – Biowaste"],
+    index=0,
+)
 
-    if mode != "Survey":
-        waste = "plastic" if "Plastic" in mode else "bio"
-        df = vigs_df.copy()
-        if "active" in df.columns:
-            df = df[df["active"].fillna(1).astype(int) == 1]
-        df = df[df["waste"] == waste].sort_values(["stratum", "vignette_id"])
-        st.subheader(f"Vignettes – {waste}")
-        for stratum, g in df.groupby("stratum"):
-            with st.expander(f"{stratum} ({len(g)})", expanded=False):
-                for _, row in g.iterrows():
-                    st.markdown(f"**{row['vignette_id']} – {row.get('title_fi','')}**")
-                    render_markdown_with_media(row.get("text_fi", ""))
-                    st.caption(f"arm_id={row.get('arm_id','')}")
-                    st.markdown("---")
-        return
+# Quick vignette browser (read from Excel) — with images for QA
+if mode.startswith("Vignettes"):
+    waste = "plastic" if "Plastic" in mode else "bio"
+    st.subheader("Vignettes" + (" – Muovipakkaukset" if waste == "plastic" else " – Biojäte"))
 
-    page_idx = st.session_state["page_idx"]
-    if page_idx >= len(flow_df):
-        st.success("Kysely on valmis.")
-        return
+    df = vigs_df.copy()
+    if "active" in df.columns:
+        df = df[df["active"].fillna(1).astype(int) == 1]
+    df = df[df["waste"] == waste].copy()
 
-    page = flow_df.iloc[page_idx]
-    page_id = normalize_str(page["page_id"])
-    page_title = normalize_str(page.get("title_fi", "")) or page_id
-    st.session_state["current_page_id"] = page_id
-    scroll_to_top()
-    st.subheader(page_title)
+    # Filters
+    strata = ["(kaikki)"] + sorted([s for s in df["stratum"].dropna().astype(str).unique()])
+    sel_stratum = st.selectbox("Suodata stratumilla", strata, index=0)
 
-    item_ids = parse_items_list(page.get("items", ""))
+    if sel_stratum != "(kaikki)":
+        df = df[df["stratum"].astype(str) == sel_stratum]
 
-    if page_id.startswith("PL_V") or page_id.startswith("BIO_V"):
-        ensure_vignette_pools(vigs_df, scale_map)
-        vignette = current_vignette(page_id)
+    show_text = st.checkbox("Näytä myös koko teksti", value=True)
+    compact = st.checkbox("Tiivis näkymä (kortit 2 sarakkeessa)", value=True)
+
+    df = df.sort_values(["stratum", "vignette_id"], kind="stable")
+
+    def render_vignette_card(row):
+        vid = str(row.get("vignette_id", ""))
+        title = str(row.get("title_fi", ""))
+        arm = str(row.get("arm_id", ""))
+        stratum = str(row.get("stratum", ""))
+        vtext = str(row.get("text_fi", ""))
+
+        img_ref = extract_first_image_ref(vtext)
+        img_file = os.path.basename(img_ref) if img_ref else "—"
+
+        st.markdown(f"**{vid} – {title}**")
+        st.caption(f"Arm: {arm} | Stratum: {stratum} | Image: {img_file}")
+
+        # Render full vignette (image + text). This uses the same renderer as the survey pages.
+        render_markdown_with_media(vtext, BASE_DIR)
+
+        if show_text is False:
+            # If user wants compact, we still show image via renderer above; nothing else needed.
+            pass
+
+        st.markdown("---")
+
+    # Group by stratum with expanders
+    for stratum, g in df.groupby("stratum"):
+        with st.expander(f"{stratum} ({len(g)} kpl)", expanded=False):
+            if compact:
+                cols = st.columns(2)
+                for idx, (_, r) in enumerate(g.iterrows()):
+                    with cols[idx % 2]:
+                        render_vignette_card(r)
+            else:
+                for _, r in g.iterrows():
+                    render_vignette_card(r)
+
+    st.stop()
+
+def get_current_vignette(page_id: str):
+    """Return vignette dict for PL_V1..3 or BIO_V1..3."""
+    pid = str(page_id).strip()
+    if pid.startswith("PL_V"):
+        try:
+            idx = int(pid.replace("PL_V","")) - 1
+        except Exception:
+            idx = 0
+        pool = st.session_state.get("plastic_pool", [])
+        return pool[idx] if idx < len(pool) else None
+    if pid.startswith("BIO_V"):
+        try:
+            idx = int(pid.replace("BIO_V","")) - 1
+        except Exception:
+            idx = 0
+        pool = st.session_state.get("bio_pool", [])
+        return pool[idx] if idx < len(pool) else None
+    return None
+
+def vignette_index_from_page_id(page_id: str) -> int:
+    """Extract trailing number from page_id like PL_V2 or BIO_V3. Returns 0-based index."""
+    m = re.search(r"(\d+)\s*$", str(page_id))
+    if not m:
+        return 0
+    try:
+        return max(0, int(m.group(1)) - 1)
+    except Exception:
+        return 0
+
+def get_current_vignette_by_lane(page_id: str):
+    pid = str(page_id).strip()
+    if pid.startswith("PL_V"):
+        idx = vignette_index_from_page_id(pid)
+        pool = st.session_state.get("plastic_pool", [])
+        return pool[idx] if idx < len(pool) else None
+    if pid.startswith("BIO_V"):
+        idx = vignette_index_from_page_id(pid)
+        pool = st.session_state.get("bio_pool", [])
+        return pool[idx] if idx < len(pool) else None
+    return None
+
+# Survey view continues below
+
+# Determine current page
+page_idx = st.session_state["page_idx"]
+if page_idx >= len(flow_df):
+    st.success("Kysely on valmis.")
+    st.stop()
+
+page = flow_df.iloc[page_idx]
+page_id = str(page["page_id"]).strip()
+is_vignette_page = str(page_id).startswith('PL_V') or str(page_id).startswith('BIO_V')
+st.session_state["current_page_id"] = page_id
+context = {}
+
+scroll_to_top()
+title_fi = str(page.get("title_fi", "")).strip()
+show_if = str(page.get("show_if", "")).strip()
+tokens = parse_items_list(page.get("items", ""))
+
+
+st.subheader(title_fi if title_fi else page_id)
+
+is_plastic_vignette_page = show_if == "LOOP_PLASTIC"
+is_bio_vignette_page = show_if == "LOOP_BIO"
+is_vignette_page = is_plastic_vignette_page or is_bio_vignette_page
+
+st.sidebar.write("DEBUG page_id:", page_id)
+st.sidebar.write("DEBUG tokens:", tokens)
+st.sidebar.write("DEBUG driver:", DRIVER_XLSX)
+
+# -----------------------------
+# Vignette pages
+# -----------------------------
+if is_vignette_page:
+    ensure_vignette_pool(flow_df, vigs_df, scale_map)
+
+    vignette, lane, idx, pool = get_vignette_for_page(page_id)
+    if vignette is None:
+        st.error(
+            f"Vignette missing for this page / stratum. page={page_id}, stratum={st.session_state.get('stratum')}, "
+            f"plastic={len(st.session_state.get('plastic_pool', []))}, bio={len(st.session_state.get('bio_pool', []))}"
+        )
+
+    # QA: show vignette preview thumbnails + IDs in sidebar (helps verify mapping)
+    # QA: show vignette preview thumbnails + IDs in sidebar (helps verify mapping)
+    with st.sidebar.expander("Vignette previews (QA)", expanded=True):
+        pool = st.session_state.get("vignette_pool") or []
+        for i, v in enumerate(pool, start=1):
+            vid = v.get("vignette_id", "")
+            arm = v.get("arm_id", "")
+            wst = v.get("waste", "")
+            img_ref = extract_first_image_ref(str(v.get("text_fi", "")))
+            st.write(f"{i}. {vid} • {arm} • {wst}")
+            if img_ref:
+                rel = img_ref.lstrip("/")
+                img_path = os.path.join(BASE_DIR, rel)
+                if os.path.exists(img_path):
+                    st.image(img_path, caption=os.path.basename(rel), use_container_width=True)
+                else:
+                    st.caption(f"Missing: {img_path}")
+            else:
+                st.caption("No image ref found")
+
+    # Select vignette for this page (and render it once).
+    if str(page_id).startswith("PL_V") or str(page_id).startswith("BIO_V"):
+        vignette, lane, idx, pool = get_vignette_for_page(page_id)
+        vpos = idx  # legacy index for logging
+        st.session_state["vignette_pos"] = vpos
+
         if vignette is None:
-            st.error(f"Vignette missing for this page / stratum. page={page_id}, stratum={st.session_state.get('stratum')}, plastic={len(st.session_state.get('plastic_pool', []))}, bio={len(st.session_state.get('bio_pool', []))}")
-            page_nav(flow_df)
-            return
-        st.markdown(f"**{vignette.get('title_fi', '')}**")
-        render_markdown_with_media(vignette.get("text_fi", ""))
-        item_ids = VIG_CORE_ITEMS[:]  # fixed simplification requested by user
+            st.warning(f"Huom: tälle ryhmälle löytyi vain {len(pool)}/3 tilannekuvaa. Tämä sivu ohitetaan.")
+            target_page = "PL_FINAL" if lane == "plastic" else ("BIO_FINAL" if lane == "bio" else None)
+            if target_page:
+                target_idx = int(flow_df.index[flow_df["page_id"].astype(str) == target_page][0])
+                if st.button("Jatka"):
+                    st.session_state["page_idx"] = target_idx
+                    scroll_to_top()
+                    st.rerun()
+            vignette = {"vignette_id": f"MISSING_{page_id}", "waste": "NA", "mech_ids": "", "title_fi": "", "text_fi": ""}
+    else:
+        vpos = st.session_state.get("vignette_pos", 0)
+        pool = st.session_state.get("vignette_pool", [])
+        vignette = pool[vpos] if (pool and vpos < len(pool)) else (pool[0] if pool else None)
+        lane, idx = None, vpos
+        if vignette is None:
+            vignette = {"vignette_id": f"MISSING_{page_id}", "waste": "NA", "mech_ids": "", "title_fi": "", "text_fi": ""}
 
-    item_rows = visible_item_rows(items_df, item_ids)
+    # Render vignette content only on vignette pages
+    if is_vignette_page and isinstance(vignette, dict):
+        title = str(vignette.get("title_fi","")).strip()
+        if title:
+            st.markdown(f"**{title}**")
+        render_markdown_with_media(str(vignette.get("text_fi","")), BASE_DIR)
 
-    with st.form(f"form_{page_id}", clear_on_submit=False):
-        answers = render_page_items(page_id, page_title, item_rows, scale_map, construct_label_map)
-        submit_label = "Tallenna ja jatka" if (page_id.endswith("FINAL") or "_V" in page_id) else "Jatka"
-        submitted = st.form_submit_button(submit_label)
+    context = {
+        "page_id": page_id,
+        "waste": vignette.get("waste", "NA") if isinstance(vignette, dict) else "NA",
+        "vignette": vignette if isinstance(vignette, dict) else {},
+        "construct_label_map": construct_label_map,
+    }
+
+
+    # On vignette pages, use the vignette-specific constructs_to_show_items from VIGNETTES.
+    # Fallback to FLOW.items if the vignette row has no custom construct list.
+    tokens_for_page = list(tokens)
+    if is_vignette_page:
+        ctsi = (context.get("vignette") or {}).get("constructs_to_show_items") or (context.get("vignette") or {}).get("constructs_to_show") or ""
+        if str(ctsi).strip():
+            tokens_for_page = parse_items_list(str(ctsi))
+
+    # Expand MECH only when explicitly requested in the vignette token list
+    mech_ids = [x.strip() for x in str((context.get("vignette") or {}).get("mech_ids", "")).split("|") if x.strip()]
+    expanded = []
+    for t in tokens_for_page:
+        if t == "MECH":
+            expanded.extend(mech_ids)
+        else:
+            expanded.append(t)
+
+    item_rows = get_item_rows(items_df, expanded)
+    item_rows = item_rows.drop_duplicates(subset=["item_id"], keep="first").reset_index(drop=True)
+
+    shuffle_flag = bool(int(page.get("randomize_items_within_page", 0) or 0))
+    item_rows = maybe_shuffle_item_rows(item_rows, shuffle_flag)
+
+    # Optional: shuffle items within the page
+    shuffle_flag = bool(int(page.get("randomize_items_within_page", 0) or 0))
+    item_rows = maybe_shuffle_item_rows(item_rows, shuffle_flag)
+
+    vid_for_key = (vignette.get("vignette_id") if isinstance(vignette, dict) else None) or f"MISSING_{page_id}"
+    with st.form(f"form_{page_id}_{vid_for_key}", clear_on_submit=False):
+        answers = {}
+
+        # ✅ Detect matrix-worthy blocks (Likert constructs)
+        if not item_rows.empty and all(item_rows["scale_id"].str.upper().str.startswith("LIKERT")):
+            answers = render_construct_blocks_matrix(item_rows, scale_map, page_id, context)
+
+        else:
+            for _, r in item_rows.iterrows():
+                answers[str(r["item_id"]).strip()] = render_item(r, context, scale_map)
+
+        submitted = st.form_submit_button("Tallenna ja jatka")
 
     if submitted:
-        st.session_state["answers"]["meta"].update(
-            {
+        vpos = locals().get('vpos', 0)
+        st.session_state["answers"]["vignettes"].append({
+            "vignette_id": vignette["vignette_id"],
+            "stratum": vignette["stratum"],
+            "waste": vignette["waste"],
+            "responses": answers,
+            "shown_order_index": vpos + 1,
+        })
+
+        # advance vignette position and page
+        if st.session_state.get("vignette_pos", 0) < 3:
+            st.session_state["vignette_pos"] = st.session_state.get("vignette_pos", 0) + 1
+            st.session_state["page_idx"] += 1
+            scroll_to_top()
+            st.rerun()
+        else:
+            st.session_state["page_idx"] += 1
+            scroll_to_top()
+            st.rerun()
+# -----------------------------
+# Non-vignette pages
+# -----------------------------
+else:
+    item_rows = get_item_rows(items_df, tokens)
+    item_rows = item_rows.drop_duplicates(subset=["item_id"], keep="first").reset_index(drop=True)
+
+    shuffle_flag = bool(int(page.get("randomize_items_within_page", 0) or 0))
+    item_rows = maybe_shuffle_item_rows(item_rows, shuffle_flag)
+
+    with st.form(f"form_{page_id}", clear_on_submit=False):
+        context = {
+            "page_id": page_id,
+            "_shown_anchors": set(),
+            "construct_label_map": construct_label_map,
+        }
+        # Inject vignette_pool for final ranking/choice rendering
+        if page_id.upper().startswith("P6") or "FINAL" in tokens:
+            context["vignette_pool"] = st.session_state.get("vignette_pool", [])
+
+        answers = {}
+
+        # ✅ Use matrix for pages that are all Likert radios
+        is_all_likert = (
+            (not item_rows.empty)
+            and all(item_rows["response_type"].str.lower().isin(["radio", "likert"]))
+            and all(item_rows["scale_id"].str.upper().str.startswith("LIKERT"))
+        )
+
+        answers = {}
+
+        # If the page has multiple constructs and many Likert items, render as construct blocks matrix
+        has_many_likert = (
+            (not item_rows.empty)
+            and (item_rows["scale_id"].astype(str).str.upper().str.startswith("LIKERT")).sum() >= 3
+        )
+
+        if has_many_likert:
+            answers.update(render_construct_blocks_matrix(item_rows, scale_map, page_id, context))
+
+        # Render any remaining non-Likert items normally
+        for _, r in item_rows.iterrows():
+            item_id = str(r["item_id"]).strip()
+            if item_id in answers:   # already rendered in matrix
+                continue
+            answers[item_id] = render_item(r, context, scale_map)
+
+        submitted = st.form_submit_button("Jatka")
+
+    if submitted:
+        st.session_state["answers"].setdefault("core", {})
+        st.session_state["answers"].setdefault("meta", {})
+        for item_id, value in answers.items():
+            if value is not None:
+                st.session_state["answers"]["core"][item_id] = value
+        for meta_id in ["AREA_TYPE", "HOUSING", "COMPOST", "BIO_SORT_ANCHOR", "PL_SORT_ANCHOR"]:
+            if meta_id in answers and answers.get(meta_id) is not None:
+                st.session_state["answers"]["meta"][meta_id] = answers.get(meta_id)
+
+        # --- Consent gate: if page includes CONSENT, require it ---
+        if "CONSENT" in tokens:
+            consent_val = None
+            for k, v in st.session_state.items():
+                if k.endswith("_CONSENT"):
+                    consent_val = v
+            if not consent_val:
+                st.error("Tarvitsen suostumuksen jatkaakseni.")
+                st.stop()
+
+                # --- Values page rule (exactly two 7s) ---
+        if not values_exact_two_sevens(items_df):
+            st.stop()
+
+# --- Routing: if page contains AREA_TYPE + HOUSING, initialize pool & meta ---
+        if "AREA_TYPE" in tokens and "HOUSING" in tokens:
+            ensure_vignette_pool(flow_df, vigs_df, scale_map)
+
+            st.session_state["answers"].setdefault("meta", {})
+            st.session_state["answers"]["meta"].update({
                 "respondent_id": st.session_state["respondent_id"],
                 "timestamp_start": st.session_state["answers"]["meta"].get("timestamp_start") or datetime.now().isoformat(),
-                "stratum": st.session_state.get("stratum") or resolve_stratum(scale_map),
-            }
-        )
-        st.session_state["answers"]["pages"][page_id] = answers
+                "stratum": st.session_state.get("stratum"),
+                "target_waste": st.session_state.get("target_waste"),
+            })
 
-        # Gate consent.
-        if page_id == "P0_CONSENT" and not st.session_state.get(make_item_key(page_id, "CONSENT")):
-            st.error("Tarvitsen suostumuksen jatkaakseni.")
-            st.stop()
+        # --- Frequencies: store whenever those items appear (P1 or P2 etc.) ---
+        if "FREQ_PL" in tokens or "FREQ_BIO" in tokens:
+            st.session_state["answers"].setdefault("core", {})
 
-        # Capture vignette page response bundle.
-        if page_id.startswith("PL_V") or page_id.startswith("BIO_V"):
-            vignette = current_vignette(page_id)
-            st.session_state["answers"]["vignettes"].append(
-                {
-                    "page_id": page_id,
-                    "vignette_id": vignette.get("vignette_id"),
-                    "waste": vignette.get("waste"),
-                    "arm_id": vignette.get("arm_id"),
-                    "responses": answers,
-                }
-            )
+            if "FREQ_PL" in tokens:
+                freq_pl = None
+                for k, v in st.session_state.items():
+                    if k.endswith("_FREQ_PL") and v is not None:
+                        freq_pl = v
+                st.session_state["answers"]["core"]["freq_plastic"] = freq_pl
 
-        # Validate final ranking uniqueness.
-        if page_id.endswith("FINAL"):
-            r1 = st.session_state.get(make_item_key(page_id, "RANK1"))
-            r2 = st.session_state.get(make_item_key(page_id, "RANK2"))
-            r3 = st.session_state.get(make_item_key(page_id, "RANK3"))
-            if len({r1, r2, r3}) < 3:
-                st.error("Rankingissa sama toimenpide ei voi olla usealla sijalla.")
+            if "FREQ_BIO" in tokens:
+                freq_bio = None
+                for k, v in st.session_state.items():
+                    if k.endswith("_FREQ_BIO") and v is not None:
+                        freq_bio = v
+                st.session_state["answers"]["core"]["freq_bio"] = freq_bio
+
+        # --- Final page detection ---
+        is_final_page = (str(page_id).endswith("_FINAL") or any(t in tokens for t in ["RANK1","RANK2","RANK3","CHOICE","WHY"]))
+        if is_final_page:
+            r1 = get_state_ending("_RANK1")
+            r2 = get_state_ending("_RANK2")
+            r3 = get_state_ending("_RANK3")
+
+            if r1 and r2 and r3 and len({r1, r2, r3}) < 3:
+                st.error("Rankingissa sama toimenpide ei voi olla usealla sijalla. Valitse kolme eri.")
                 st.stop()
-            st.session_state["answers"]["final"][page_id] = {
-                "ranking": [r1, r2, r3],
-                "choice": st.session_state.get(make_item_key(page_id, "CHOICE")),
-                "why": st.session_state.get(make_item_key(page_id, "WHY")),
-            }
 
-        # End page save.
-        if page_id == "P9_END":
-            st.session_state["answers"]["meta"]["timestamp_end"] = datetime.now().isoformat()
-            path = save_payload(st.session_state["answers"])
-            st.success(f"Kiitos! Vastaukset tallennettu: {path}")
-            with open(path, "rb") as f:
-                st.download_button("Lataa vastaukset (JSON)", f, file_name=os.path.basename(path), mime="application/json")
-            st.stop()
+            choice = get_state_ending("_CHOICE")
+            if choice is not None:
+                st.session_state["answers"]["final"] = {
+                    "ranking": {"1": r1, "2": r2, "3": r3},
+                    "forced_choice": choice,
+                    "open_rationale": (get_state_ending("_WHY") or "").strip(),
+                    "timestamp_end": datetime.now().isoformat(),
+                }
+                path = save_jsonl(st.session_state["answers"])
+                st.success(f"Kiitos! Vastaukset tallennettu tiedostoon: {path}")
+                st.session_state["answers"]["meta"]["saved_path"] = path
+                with open(path, "rb") as f:
+                    st.download_button(
+                        "Lataa vastaukset (JSONL)",
+                        f,
+                        file_name=os.path.basename(path),
+                        mime="application/jsonl",
+                    )
+                st.stop()
 
         st.session_state["page_idx"] += 1
         scroll_to_top()
         st.rerun()
+st.sidebar.write("DEBUG items on page:", item_rows[["item_id", "response_type"]].to_dict("records"))
 
-    page_nav(flow_df)
-
-
-if __name__ == "__main__":
-    main()
+# -----------------------------
+# Navigation
+# -----------------------------
+st.markdown("---")
+cols = st.columns([1, 1, 2])
+with cols[0]:
+    if st.button("Takaisin", disabled=st.session_state["page_idx"] == 0):
+        if is_vignette_page and st.session_state.get("vignette_pos", 0) > 0:
+            st.session_state["vignette_pos"] = st.session_state.get("vignette_pos", 0) - 1
+        st.session_state["page_idx"] = max(0, st.session_state["page_idx"] - 1)
+        scroll_to_top()
+        st.rerun()
+with cols[1]:
+    if st.button("Aloita alusta"):
+        for k in list(st.session_state.keys()):
+            del st.session_state[k]
+        scroll_to_top()
+        st.rerun()
+with cols[2]:
+    st.caption(
+        f"Page {st.session_state['page_idx']+1}/{len(flow_df)} • Stratum: {st.session_state.get('stratum')} • Pool: 3 plastic + 3 bio"
+    )
