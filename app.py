@@ -1186,9 +1186,9 @@ else:
                         freq_bio = v
                 st.session_state["answers"]["core"]["freq_bio"] = freq_bio
 
-        # --- Final page detection ---
-        is_final_page = (str(page_id).endswith("_FINAL") or any(t in tokens for t in ["RANK1","RANK2","RANK3","CHOICE","WHY"]))
-        if is_final_page:
+        # --- Final-page handling ---
+        is_summary_page = (str(page_id).endswith("_FINAL") or any(t in tokens for t in ["RANK1","RANK2","RANK3","CHOICE","WHY"]))
+        if is_summary_page:
             r1 = get_state_ending("_RANK1")
             r2 = get_state_ending("_RANK2")
             r3 = get_state_ending("_RANK3")
@@ -1198,24 +1198,38 @@ else:
                 st.stop()
 
             choice = get_state_ending("_CHOICE")
+            why = (get_state_ending("_WHY") or "").strip()
             if choice is not None:
-                st.session_state["answers"]["final"] = {
+                st.session_state["answers"].setdefault("final", {})
+
+                summary_payload = {
                     "ranking": {"1": r1, "2": r2, "3": r3},
                     "forced_choice": choice,
-                    "open_rationale": (get_state_ending("_WHY") or "").strip(),
-                    "timestamp_end": datetime.now().isoformat(),
+                    "open_rationale": why,
+                    "page_id": page_id,
                 }
-                path = save_jsonl(st.session_state["answers"])
-                st.success(f"Kiitos! Vastaukset tallennettu tiedostoon: {path}")
-                st.session_state["answers"]["meta"]["saved_path"] = path
-                with open(path, "rb") as f:
-                    st.download_button(
-                        "Lataa vastaukset (JSONL)",
-                        f,
-                        file_name=os.path.basename(path),
-                        mime="application/jsonl",
-                    )
-                st.stop()
+
+                if str(page_id).startswith("PL_"):
+                    st.session_state["answers"]["final"]["plastic"] = summary_payload
+                elif str(page_id).startswith("BIO_"):
+                    st.session_state["answers"]["final"]["bio"] = summary_payload
+                else:
+                    st.session_state["answers"]["final"][page_id] = summary_payload
+
+                # Only save and finish after the bio summary / true final summary page.
+                if str(page_id).startswith("BIO_") or str(page_id) == "P9_END":
+                    st.session_state["answers"]["final"]["timestamp_end"] = datetime.now().isoformat()
+                    path = save_jsonl(st.session_state["answers"])
+                    st.success(f"Kiitos! Vastaukset tallennettu tiedostoon: {path}")
+                    st.session_state["answers"]["meta"]["saved_path"] = path
+                    with open(path, "rb") as f:
+                        st.download_button(
+                            "Lataa vastaukset (JSONL)",
+                            f,
+                            file_name=os.path.basename(path),
+                            mime="application/jsonl",
+                        )
+                    st.stop()
 
         st.session_state["page_idx"] += 1
         scroll_to_top()
