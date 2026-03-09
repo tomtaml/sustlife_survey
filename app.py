@@ -182,6 +182,24 @@ def load_driver(path: str):
     return items, flow, vigs, model, scale_map, construct_label_map
 
 
+
+
+def get_label_for_value(scale_map: dict, scale_id: str, value):
+    sid = str(scale_id).strip()
+    if value is None or sid not in scale_map:
+        return value
+    for vv, lbl in scale_map[sid]:
+        if vv == value:
+            return lbl
+        try:
+            if float(vv) == float(value):
+                return lbl
+        except Exception:
+            pass
+        if str(vv).strip() == str(value).strip():
+            return lbl
+    return value
+
 def save_jsonl(payload: dict) -> str:
     ts = datetime.now().strftime("%Y%m%d_%H%M%S")
     filename = f"suslife_v2_{ts}_{st.session_state['respondent_id'][:8]}.jsonl"
