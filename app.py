@@ -521,10 +521,21 @@ def page_nav(flow_df):
         st.caption(f"Page {st.session_state['page_idx'] + 1}/{len(flow_df)} • Stratum: {st.session_state.get('stratum')}")
 
 
-def write_order_check(flow_df: pd.DataFrame):
+def build_order_check(flow_df: pd.DataFrame) -> str:
     expected = SPEC_FLOW_ORDER
     actual = flow_df["page_id"].astype(str).tolist()
-    lines = ["# Survey v2 order check", "", "## Expected order", *[f"{i+1}. {p}" for i, p in enumerate(expected)], "", "## Actual order used in app_v2", *[f"{i+1}. {p}" for i, p in enumerate(actual)], "", "## Status"]
+    lines = [
+        "# Survey v2 order check",
+        "",
+        "## Expected order",
+        *[f"{i+1}. {p}" for i, p in enumerate(expected)],
+        "",
+        "## Actual order used in app_v2",
+        *[f"{i+1}. {p}" for i, p in enumerate(actual)],
+        "",
+        "## Status",
+    ]
+
     if actual == expected:
         lines.append("Order matches the v2 target flow exactly.")
     else:
@@ -533,16 +544,16 @@ def write_order_check(flow_df: pd.DataFrame):
             if e != a:
                 lines.append(f"- First mismatch at position {i}: expected {e}, actual {a}")
                 break
+
         extra_expected = [p for p in expected if p not in actual]
         extra_actual = [p for p in actual if p not in expected]
+
         if extra_expected:
             lines.append(f"- Missing from actual: {', '.join(extra_expected)}")
         if extra_actual:
             lines.append(f"- Extra in actual: {', '.join(extra_actual)}")
-    out = "/mnt/data/order_check_v2.md"
-    with open(out, "w", encoding="utf-8") as f:
-        f.write("\n".join(lines))
-    return out
+
+    return "\n".join(lines)
 
 
 def main():
