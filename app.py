@@ -5,6 +5,7 @@ import uuid
 from datetime import datetime
 
 import pandas as pd
+import requests
 import streamlit as st
 
 # =============================
@@ -45,8 +46,21 @@ def scroll_to_top():
 DATA_DIR = os.path.join(BASE_DIR, "data")
 os.makedirs(DATA_DIR, exist_ok=True)
 
+def resolve_driver_path() -> str:
+    candidates = [
+        "Suslife_master_driver_v4_info.xlsx",
+        "Suslife_master_driver_v2_harmonized_vignettes.xlsx",
+        "Suslife_master_driver_v2_checked.xlsx",
+        "Suslife_master_driver.xlsx",
+    ]
+    for name in candidates:
+        path = os.path.join(BASE_DIR, name)
+        if os.path.exists(path):
+            return path
+    return os.path.join(BASE_DIR, "Suslife_master_driver.xlsx")
+
 # Master driver workbook (keep in same folder as the app)
-DRIVER_XLSX = os.path.join(BASE_DIR, "Suslife_master_driver.xlsx")
+DRIVER_XLSX = resolve_driver_path()
 
 # Sheet names (fixed in the starter template)
 SHEET_ITEMS = "ITEMS"
@@ -94,7 +108,8 @@ def route_stratum(area_type: str, housing: str) -> str:
 def init_state():
     st.session_state.setdefault("respondent_id", str(uuid.uuid4()))
     st.session_state.setdefault("page_idx", 0)
-    st.session_state.setdefault("answers", {"meta": {}, "core": {}, "vignettes": [], "final": {}})
+    st.session_state.setdefault("answers", {"meta": {}, "core": {}, "pages": {}, "vignettes": [], "final": {}})
+    st.session_state.setdefault("final_saved", False)
     st.session_state.setdefault("stratum", None)
 
     # Vignette pools (3 plastic + 3 bio)
@@ -164,7 +179,7 @@ def load_driver(path: str):
         if lbl:
             construct_label_map[(cid, w)] = lbl
 
-        return items, flow, vigs, model, scale_map, construct_label_map
+    return items, flow, vigs, model, scale_map, construct_label_map
 
 
 def save_jsonl(payload: dict) -> str:
@@ -174,6 +189,81 @@ def save_jsonl(payload: dict) -> str:
     with open(path, "a", encoding="utf-8") as f:
         f.write(json.dumps(payload, ensure_ascii=False) + "\n")
     return path
+
+
+
+def get_label_for_value(scale_map: dict, scale_id: str, value):
+    sid = str(scale_id).strip()
+    if value is None or sid not in scale_map:
+        return value
+    for vv, lbl in scale_map[sid]:
+        if vv == value:
+            return lbl
+        try:
+            if float(vv) == float(value):
+                return lbl
+        except Exception:
+            pass
+        if str(vv).strip() == str(value).strip():
+            return lbl
+    return value
+
+
+def build_submission_payload(scale_map: dict) -> dict:
+    answers = st.session_state.get("answers", {})
+    meta = answers.get("meta", {}) or {}
+    core = answers.get("core", {}) or {}
+    final = answers.get("final", {}) or {}
+
+    area_val = meta.get("area_type", core.get("AREA_TYPE"))
+    housing_val = meta.get("housing", core.get("HOUSING"))
+    compost_val = meta.get("compost", core.get("COMPOST"))
+    bio_anchor = meta.get("bio_sort_anchor", core.get("BIO_SORT_ANCHOR"))
+
+    try:
+        is_active_composter = bool((compost_val in (1, "1", True, "Kyllä", "kyllä")) and (bio_anchor in (1, "1", 2, "2", True)))
+    except Exception:
+        is_active_composter = False
+
+    plastic_final = final.get("plastic", {}) or {}
+    bio_final = final.get("bio", {}) or {}
+
+    payload_answers = json.loads(json.dumps(answers, ensure_ascii=False, default=str))
+
+    return {
+        "submitted_at": datetime.now().isoformat(),
+        "respondent_id": st.session_state.get("respondent_id", ""),
+        "stratum": meta.get("stratum") or st.session_state.get("stratum", ""),
+        "area_type": meta.get("area_type_label") or get_label_for_value(scale_map, "AREA_TYPES", area_val) or "",
+        "housing": meta.get("housing_label") or get_label_for_value(scale_map, "HOUSING_TYPES", housing_val) or "",
+        "is_active_composter": is_active_composter,
+        "plastic_choice": plastic_final.get("forced_choice", ""),
+        "bio_choice": bio_final.get("forced_choice", ""),
+        "payload_json": json.dumps(payload_answers, ensure_ascii=False),
+        "answers": payload_answers,
+    }
+
+
+def save_to_apps_script(payload: dict):
+    try:
+        url = st.secrets.get("apps_script", {}).get("url", "").strip()
+    except Exception:
+        url = ""
+    if not url:
+        return False, "Apps Script URL puuttuu Streamlit-secretsistä."
+
+    try:
+        response = requests.post(url, json=payload, timeout=20)
+        response.raise_for_status()
+        try:
+            data = response.json()
+        except Exception:
+            return True, "Tallennus onnistui, mutta vastaus ei ollut JSON."
+        if data.get("ok") is True:
+            return True, "Tallennus onnistui."
+        return False, data.get("error", "Tuntematon Apps Script -virhe.")
+    except Exception as e:
+        return False, str(e)
 
 def get_state_ending(suffix: str):
     for k, v in st.session_state.items():
@@ -490,6 +580,7 @@ def render_construct_blocks_matrix(item_rows: pd.DataFrame, scale_map: dict, pag
         )
 
         with st.container(border=True):
+            st.markdown(f"### {label}")
             st.markdown(
                 "<div style='font-weight:600; margin-bottom:0.5rem;'>"
                 "Valitse kunkin väittämän kohdalla vaihtoehto, joka kuvaa mielipidettäsi parhaiten."
@@ -658,7 +749,7 @@ def render_item(item_row: pd.Series, context: dict, scale_map: dict):
             return None
 
         opts = [str(v.get("vignette_id","")) for v in pool]
-        labels = {str(v.get("vignette_id","")): str(v.get('title_fi','') or v.get('vignette_id','')) for v in pool}
+        labels = {str(v.get("vignette_id","")): f"{v.get('vignette_id')} – {v.get('title_fi','')}" for v in pool}
 
         if response_type == "rank_select":
             return st.selectbox(q, opts, format_func=lambda x: labels.get(x, x), key=key)
@@ -1059,6 +1150,41 @@ else:
     shuffle_flag = bool(int(page.get("randomize_items_within_page", 0) or 0))
     item_rows = maybe_shuffle_item_rows(item_rows, shuffle_flag)
 
+    if page_id == "P9_END":
+        context = {
+            "page_id": page_id,
+            "_shown_anchors": set(),
+            "construct_label_map": construct_label_map,
+        }
+        answers = {}
+        for _, r in item_rows.iterrows():
+            item_id = str(r["item_id"]).strip()
+            answers[item_id] = render_item(r, context, scale_map)
+
+        st.session_state["answers"].setdefault("meta", {})
+        st.session_state["answers"]["meta"].update({
+            "respondent_id": st.session_state["respondent_id"],
+            "timestamp_start": st.session_state["answers"]["meta"].get("timestamp_start") or datetime.now().isoformat(),
+            "stratum": st.session_state.get("stratum"),
+            "timestamp_end": st.session_state["answers"]["meta"].get("timestamp_end") or datetime.now().isoformat(),
+        })
+        st.session_state["answers"].setdefault("pages", {})
+        st.session_state["answers"]["pages"][page_id] = {k: v for k, v in answers.items() if v is not None}
+
+        if not st.session_state.get("final_saved", False):
+            payload = build_submission_payload(scale_map)
+            saved, msg = save_to_apps_script(payload)
+            st.session_state["answers"]["meta"]["timestamp_submitted"] = payload["submitted_at"]
+            if saved:
+                st.session_state["final_saved"] = True
+                st.success("Kiitos! Vastaukset tallennettu Google Sheetiin.")
+            else:
+                path = save_jsonl(payload)
+                st.session_state["final_saved"] = True
+                st.session_state["answers"]["meta"]["saved_path"] = path
+                st.warning(f"Google Sheets -tallennus epäonnistui ({msg}). Vastaukset tallennettu palvelimen data-kansioon: {path}")
+        st.stop()
+
     with st.form(f"form_{page_id}", clear_on_submit=False):
         context = {
             "page_id": page_id,
@@ -1110,39 +1236,53 @@ else:
                 st.error("Tarvitsen suostumuksen jatkaakseni.")
                 st.stop()
 
-                # --- Values page rule (exactly two 7s) ---
         if not values_exact_two_sevens(items_df):
             st.stop()
 
-# --- Routing: if page contains AREA_TYPE + HOUSING, initialize pool & meta ---
+        st.session_state["answers"].setdefault("meta", {})
+        st.session_state["answers"].setdefault("core", {})
+        st.session_state["answers"].setdefault("pages", {})
+        st.session_state["answers"].setdefault("final", {})
+
+        st.session_state["answers"]["meta"].update({
+            "respondent_id": st.session_state["respondent_id"],
+            "timestamp_start": st.session_state["answers"]["meta"].get("timestamp_start") or datetime.now().isoformat(),
+            "stratum": st.session_state.get("stratum"),
+        })
+
+        answers_clean = {k: v for k, v in answers.items() if v is not None}
+        st.session_state["answers"]["pages"][page_id] = answers_clean
+
+        # --- Routing: if page contains AREA_TYPE + HOUSING, initialize pool & meta ---
         if "AREA_TYPE" in tokens and "HOUSING" in tokens:
             ensure_vignette_pool(flow_df, vigs_df, scale_map)
-
-            st.session_state["answers"].setdefault("meta", {})
+            area_val = answers_clean.get("AREA_TYPE")
+            housing_val = answers_clean.get("HOUSING")
             st.session_state["answers"]["meta"].update({
-                "respondent_id": st.session_state["respondent_id"],
-                "timestamp_start": st.session_state["answers"]["meta"].get("timestamp_start") or datetime.now().isoformat(),
+                "area_type": area_val,
+                "housing": housing_val,
+                "area_type_label": get_label_for_value(scale_map, "AREA_TYPES", area_val) if area_val is not None else "",
+                "housing_label": get_label_for_value(scale_map, "HOUSING_TYPES", housing_val) if housing_val is not None else "",
                 "stratum": st.session_state.get("stratum"),
-                "target_waste": st.session_state.get("target_waste"),
             })
 
-        # --- Frequencies: store whenever those items appear (P1 or P2 etc.) ---
+        if "COMPOST" in tokens:
+            st.session_state["answers"]["meta"]["compost"] = answers_clean.get("COMPOST")
+        if "PL_SORT_ANCHOR" in tokens:
+            st.session_state["answers"]["meta"]["pl_sort_anchor"] = answers_clean.get("PL_SORT_ANCHOR")
+        if "BIO_SORT_ANCHOR" in tokens:
+            st.session_state["answers"]["meta"]["bio_sort_anchor"] = answers_clean.get("BIO_SORT_ANCHOR")
+
+        # store all ordinary page answers into core
+        if not (str(page_id).endswith("_FINAL") or page_id.startswith("PL_V") or page_id.startswith("BIO_V")):
+            st.session_state["answers"]["core"].update(answers_clean)
+
+        # --- Frequencies: store whenever those items appear ---
         if "FREQ_PL" in tokens or "FREQ_BIO" in tokens:
-            st.session_state["answers"].setdefault("core", {})
-
             if "FREQ_PL" in tokens:
-                freq_pl = None
-                for k, v in st.session_state.items():
-                    if k.endswith("_FREQ_PL") and v is not None:
-                        freq_pl = v
-                st.session_state["answers"]["core"]["freq_plastic"] = freq_pl
-
+                st.session_state["answers"]["core"]["freq_plastic"] = answers_clean.get("FREQ_PL")
             if "FREQ_BIO" in tokens:
-                freq_bio = None
-                for k, v in st.session_state.items():
-                    if k.endswith("_FREQ_BIO") and v is not None:
-                        freq_bio = v
-                st.session_state["answers"]["core"]["freq_bio"] = freq_bio
+                st.session_state["answers"]["core"]["freq_bio"] = answers_clean.get("FREQ_BIO")
 
         # --- Final page detection ---
         is_final_page = (str(page_id).endswith("_FINAL") or any(t in tokens for t in ["RANK1","RANK2","RANK3","CHOICE","WHY"]))
@@ -1157,23 +1297,13 @@ else:
 
             choice = get_state_ending("_CHOICE")
             if choice is not None:
-                st.session_state["answers"]["final"] = {
+                lane = "plastic" if page_id.startswith("PL_") else "bio"
+                st.session_state["answers"]["final"][lane] = {
                     "ranking": {"1": r1, "2": r2, "3": r3},
                     "forced_choice": choice,
                     "open_rationale": (get_state_ending("_WHY") or "").strip(),
-                    "timestamp_end": datetime.now().isoformat(),
+                    "captured_at": datetime.now().isoformat(),
                 }
-                path = save_jsonl(st.session_state["answers"])
-                st.success(f"Kiitos! Vastaukset tallennettu tiedostoon: {path}")
-                st.session_state["answers"]["meta"]["saved_path"] = path
-                with open(path, "rb") as f:
-                    st.download_button(
-                        "Lataa vastaukset (JSONL)",
-                        f,
-                        file_name=os.path.basename(path),
-                        mime="application/jsonl",
-                    )
-                st.stop()
 
         st.session_state["page_idx"] += 1
         scroll_to_top()
