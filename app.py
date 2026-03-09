@@ -21,10 +21,23 @@ st.markdown(
     unsafe_allow_html=True,
 )
 
-BASE_DIR = os.path.dirname(os.path.abspath(__file__)) if "__file__" in globals() else "/mnt/data"
+BASE_DIR = os.path.dirname(os.path.abspath(__file__)) if "__file__" in globals() else os.getcwd()
 DATA_DIR = os.path.join(BASE_DIR, "data")
 os.makedirs(DATA_DIR, exist_ok=True)
-DRIVER_XLSX = os.path.join(BASE_DIR, "Suslife_master_driver.xlsx")
+
+def resolve_driver_path() -> str:
+    candidates = [
+        "Suslife_master_driver_v2_harmonized_vignettes.xlsx",
+        "Suslife_master_driver_v2_checked.xlsx",
+        "Suslife_master_driver.xlsx",
+    ]
+    for name in candidates:
+        path = os.path.join(BASE_DIR, name)
+        if os.path.exists(path):
+            return path
+    return os.path.join(BASE_DIR, "Suslife_master_driver.xlsx")
+
+DRIVER_XLSX = resolve_driver_path()
 
 SHEET_ITEMS = "ITEMS"
 SHEET_SCALES = "SCALES"
@@ -335,6 +348,13 @@ def route_stratum(area_type, housing):
     return f"{hh}_{area}"
 
 
+def get_state_ending(suffix: str):
+    for k, v in st.session_state.items():
+        if k.endswith(suffix):
+            return v
+    return None
+
+
 def resolve_stratum(scale_map):
     area = st.session_state.get(make_item_key("P2_CONTEXT", "AREA_TYPE"))
     housing = st.session_state.get(make_item_key("P2_CONTEXT", "HOUSING"))
@@ -346,23 +366,102 @@ def resolve_stratum(scale_map):
 
 
 def ensure_vignette_pools(vigs_df, scale_map):
+    """Initialize stratum + plastic_pool (3) + bio_pool (3), staying close to the original app logic."""
     if st.session_state.get("plastic_pool") and st.session_state.get("bio_pool"):
         return
-    stratum = resolve_stratum(scale_map)
-    if not stratum:
+
+    area = get_state_ending("_AREA_TYPE")
+    housing = get_state_ending("_HOUSING")
+    compost = get_state_ending("_COMPOST")
+    bio_anchor = get_state_ending("_BIO_SORT_ANCHOR")
+
+    if area is None or housing is None:
         return
+
+    def decode_label(scale_id: str, value):
+        sid = str(scale_id).strip()
+        if sid not in scale_map:
+            return value
+        for vv, lbl in scale_map[sid]:
+            if vv == value:
+                return lbl
+            try:
+                if float(vv) == float(value):
+                    return lbl
+            except Exception:
+                pass
+        return value
+
+    area_label = decode_label("AREA_TYPES", area)
+    housing_label = decode_label("HOUSING_TYPES", housing)
+
+    stratum = route_stratum(str(area_label), str(housing_label))
     st.session_state["stratum"] = stratum
 
     pool = vigs_df.copy()
     if "active" in pool.columns:
         pool = pool[pool["active"].fillna(1).astype(int) == 1]
-    pool = pool[pool["stratum"] == stratum].copy()
-    pool = pool.drop_duplicates(subset=["vignette_id"], keep="first")
 
-    plastic = pool[pool["waste"] == "plastic"].sort_values("vignette_id").to_dict("records")[:3]
-    bio = pool[pool["waste"] == "bio"].sort_values("vignette_id").to_dict("records")[:3]
-    st.session_state["plastic_pool"] = plastic
+    pool = pool[pool["stratum"].astype(str) == stratum]
+
+    dedup_cols = [c for c in ["vignette_id", "arm_id", "waste", "stratum", "text_fi"] if c in pool.columns]
+    if dedup_cols:
+        pool = pool.drop_duplicates(subset=dedup_cols, keep="first")
+    if "vignette_id" in pool.columns:
+        pool = pool.drop_duplicates(subset=["vignette_id"], keep="first")
+
+    is_active_composter = False
+    try:
+        is_compost = compost in (1, "1", True, "Kyllä", "kyllä")
+        is_active_bio = bio_anchor in (1, "1", 2, "2")
+        is_active_composter = bool(is_compost and is_active_bio)
+    except Exception:
+        is_active_composter = False
+
+    def pick_unique(df, n=3):
+        if df.empty:
+            return []
+        rows = df.to_dict("records")
+        random.shuffle(rows)
+        picked = []
+        seen_vid = set()
+        seen_arm = set()
+        for r in rows:
+            vid = str(r.get("vignette_id", ""))
+            arm = str(r.get("arm_id", ""))
+            if vid and vid in seen_vid:
+                continue
+            if arm and arm in seen_arm:
+                continue
+            picked.append(r)
+            if vid:
+                seen_vid.add(vid)
+            if arm:
+                seen_arm.add(arm)
+            if len(picked) >= n:
+                return picked
+        for r in rows:
+            vid = str(r.get("vignette_id", ""))
+            if vid and vid in seen_vid:
+                continue
+            picked.append(r)
+            if vid:
+                seen_vid.add(vid)
+            if len(picked) >= n:
+                break
+        return picked[:n]
+
+    pl_df = pool[pool["waste"].astype(str) == "plastic"]
+    pl = pick_unique(pl_df, n=3)
+
+    bio_df = pool[pool["waste"].astype(str) == "bio"]
+    if is_active_composter and "arm_id" in bio_df.columns:
+        bio_df = bio_df[~bio_df["arm_id"].astype(str).isin({"BioA10", "BioA11"})]
+    bio = pick_unique(bio_df, n=3)
+
+    st.session_state["plastic_pool"] = pl
     st.session_state["bio_pool"] = bio
+    st.session_state["vignette_pool"] = pl + bio
 
 
 def current_vignette(page_id: str):
@@ -457,63 +556,126 @@ def render_info(question: str):
 
 
 def render_scalar(item_row: pd.Series, page_id: str, scale_map: dict):
-    item_id = item_row["item_id"]
+    item_id = str(item_row["item_id"]).strip()
     q = normalize_str(item_row.get("question_fi", ""))
     response_type = normalize_str(item_row.get("response_type", "")).lower()
     scale_id = normalize_str(item_row.get("scale_id", ""))
     key = make_item_key(page_id, item_id)
 
-    if response_type == "info":
-        return render_info(q)
+    if response_type in {"info", "markdown", "display", "intro"}:
+        render_markdown_with_media(q)
+        return True
     if response_type == "checkbox":
         return st.checkbox(q, key=key)
-    if response_type in {"text", "textarea"}:
+    if response_type in {"text", "textarea", "open"}:
         return st.text_area(q, key=key)
     if response_type == "slider":
         return st.slider(q, min_value=0, max_value=100, key=key)
 
     if scale_id == "VIGNETTE_POOL":
-        waste = "plastic" if page_id.startswith("PL_") else "bio"
-        pool = st.session_state.get("plastic_pool", []) if waste == "plastic" else st.session_state.get("bio_pool", [])
-        options = [v["vignette_id"] for v in pool]
-        labels = {v["vignette_id"]: f"{v['vignette_id']} – {v.get('title_fi','')}" for v in pool}
+        pid = str(st.session_state.get("current_page_id", ""))
+        if pid.startswith("PL_"):
+            pool = st.session_state.get("plastic_pool", [])
+        elif pid.startswith("BIO_"):
+            pool = st.session_state.get("bio_pool", [])
+        else:
+            pool = st.session_state.get("vignette_pool", [])
+        options = [str(v.get("vignette_id", "")) for v in pool]
+        labels = {str(v.get("vignette_id", "")): f"{v.get('vignette_id')} – {v.get('title_fi', '')}" for v in pool}
         if response_type == "rank_select":
             return st.selectbox(q, options, key=key, format_func=lambda x: labels.get(x, x))
-        return st.radio(q, options, key=key, format_func=lambda x: labels.get(x, x))
+        return st.radio(q, options, key=key, format_func=lambda x: labels.get(x, x), horizontal=False)
 
     opts = get_scale_options(scale_map, scale_id)
     values = [v for v, _ in opts]
     labels = {v: l for v, l in opts}
     if response_type == "select_one":
         return st.selectbox(q, values, key=key, format_func=lambda x: labels.get(x, str(x)))
+
     if response_type == "radio":
+        is_likert = str(scale_id).upper().startswith("LIKERT")
+        if is_likert:
+            return st.radio(q, values, key=key, horizontal=True, format_func=lambda x: str(x))
         return st.radio(q, values, key=key, horizontal=False, format_func=lambda x: labels.get(x, str(x)))
+
     return st.text_input(q, key=key)
 
 
-def render_page_items(page_id: str, page_title: str, item_rows: pd.DataFrame, scale_map: dict):
+def render_construct_blocks_matrix(item_rows: pd.DataFrame, scale_map: dict, page_id: str, construct_label_map: dict):
     answers = {}
+    if item_rows.empty:
+        return answers
 
-    # Group consecutive likert radio items by construct.
-    for construct_id, grp in item_rows.groupby("construct_id", sort=False):
-        grp = grp.copy().reset_index(drop=True)
-        all_likert = (
-            len(grp) > 1
-            and all(grp["response_type"].str.lower() == "radio")
-            and all(grp["scale_id"].astype(str).str.startswith("LIKERT"))
-        )
-        if all_likert:
-            label = construct_id
-            st.markdown(f"### {label}")
-            for _, r in grp.iterrows():
-                st.markdown(f"<div class='sus-q'>{r['question_fi']}</div>", unsafe_allow_html=True)
-                answers[r["item_id"]] = render_scalar(r, page_id, scale_map)
+    for construct_id, g in item_rows.groupby("construct_id", sort=False):
+        g = g.reset_index(drop=True)
+        g_likert = g[
+            g["scale_id"].astype(str).str.upper().str.startswith("LIKERT")
+            & g["response_type"].astype(str).str.lower().isin(["radio", "likert"])
+        ]
+        if len(g_likert) < 2:
             continue
 
-        for _, r in grp.iterrows():
-            answers[r["item_id"]] = render_scalar(r, page_id, scale_map)
+        scale_id = str(g_likert.iloc[0]["scale_id"]).strip()
+        if scale_id not in scale_map:
+            continue
 
-    # Conditional anchor follow-ups.
+        opts = scale_map[scale_id]
+        values = [v for v, _ in opts]
+        labels = {v: str(lbl) for v, lbl in opts}
+        values = [v for v in values if str(v) != "99" and "en osaa" not in labels.get(v, "").lower()]
+
+        label = construct_label_map.get((construct_id, "NA")) or construct_label_map.get((construct_id, "")) or construct_id
+
+        with st.container(border=True):
+            st.markdown(f"### {label}")
+            header_cols = st.columns([6] + [1] * len(values))
+            header_cols[0].markdown("**Väittämä**")
+            for j, v in enumerate(values):
+                header_cols[j + 1].markdown(f"**{v}**")
+
+            for _, r in g_likert.iterrows():
+                item_id = str(r["item_id"]).strip()
+                q = str(r.get("question_fi", "")).strip()
+                key = f"{page_id}_{item_id}"
+
+                row_cols = st.columns([6, len(values)])
+                row_cols[0].markdown(
+                    f"<div style='font-size:1.02rem; font-weight:500; line-height:1.35'>{q}</div>",
+                    unsafe_allow_html=True,
+                )
+                with row_cols[1]:
+                    answers[item_id] = st.radio(
+                        "",
+                        values,
+                        format_func=lambda x: str(x),
+                        horizontal=True,
+                        key=key,
+                        label_visibility="collapsed",
+                    )
+
+            if len(values) >= 3:
+                v_first = values[0]
+                v_mid = values[len(values) // 2]
+                v_last = values[-1]
+                c1, c2, c3 = st.columns(3)
+                c1.caption(f"{v_first} = {labels.get(v_first, '')}")
+                c2.caption(f"{v_mid} = {labels.get(v_mid, '')}")
+                c3.caption(f"{v_last} = {labels.get(v_last, '')}")
+
+    return answers
+
+
+def render_page_items(page_id: str, page_title: str, item_rows: pd.DataFrame, scale_map: dict, construct_label_map: dict):
+    answers = {}
+
+    answers.update(render_construct_blocks_matrix(item_rows, scale_map, page_id, construct_label_map))
+
+    for _, r in item_rows.iterrows():
+        item_id = str(r["item_id"]).strip()
+        if item_id in answers:
+            continue
+        answers[item_id] = render_scalar(r, page_id, scale_map)
+
     if page_id == "P3_ANCHORS":
         pl_anchor = st.session_state.get(make_item_key(page_id, "PL_SORT_ANCHOR"))
         bio_anchor = st.session_state.get(make_item_key(page_id, "BIO_SORT_ANCHOR"))
@@ -522,11 +684,15 @@ def render_page_items(page_id: str, page_title: str, item_rows: pd.DataFrame, sc
         if bio_anchor is not None:
             answers["BIO_SORT_SHARE"] = 100 - int(bio_anchor)
         if pl_anchor is not None and int(pl_anchor) > 20:
-            q = "Jos arvion mukaan alle 80 % muovipakkauksista tulee lajiteltua: Millaiset muovipakkaukset päätyvät teillä tyypillisesti sekajätteeseen, ja miksi?"
-            answers["PL_ANCHOR_OE"] = st.text_area(q, key=make_item_key(page_id, "PL_ANCHOR_OE"))
+            answers["PL_ANCHOR_OE"] = st.text_area(
+                "Jos arvion mukaan alle 80 % muovipakkauksista tulee lajiteltua: Millaiset muovipakkaukset päätyvät teillä tyypillisesti sekajätteeseen, ja miksi?",
+                key=make_item_key(page_id, "PL_ANCHOR_OE"),
+            )
         if bio_anchor is not None and int(bio_anchor) > 20:
-            q = "Jos arvion mukaan alle 80 % biojätteestä tulee lajiteltua: Millainen biojäte päätyy teillä tyypillisesti sekajätteeseen, ja miksi?"
-            answers["BIO_ANCHOR_OE"] = st.text_area(q, key=make_item_key(page_id, "BIO_ANCHOR_OE"))
+            answers["BIO_ANCHOR_OE"] = st.text_area(
+                "Jos arvion mukaan alle 80 % biojätteestä tulee lajiteltua: Millainen biojäte päätyy teillä tyypillisesti sekajätteeseen, ja miksi?",
+                key=make_item_key(page_id, "BIO_ANCHOR_OE"),
+            )
 
     return answers
 
@@ -595,7 +761,7 @@ def main():
     order_check_md = build_order_check(flow_df)
 
     st.title("Sustlife – Survey demo")
-    st.caption(f"Updated order, original vignette logic kept close to v1, workbook: {os.path.basename(DRIVER_XLSX)}")
+    st.caption(f"Updated order with original-style vignette selection and horizontal Likert layout, workbook: {os.path.basename(DRIVER_XLSX)}")
 
     mode = st.sidebar.radio("Näkymä", ["Survey", "Vignettes – Plastic", "Vignettes – Biowaste"], index=0)
     with st.sidebar.expander("Order check report", expanded=False):
@@ -635,7 +801,7 @@ def main():
         ensure_vignette_pools(vigs_df, scale_map)
         vignette = current_vignette(page_id)
         if vignette is None:
-            st.error("Vignette missing for this page / stratum.")
+            st.error(f"Vignette missing for this page / stratum. page={page_id}, stratum={st.session_state.get('stratum')}, plastic={len(st.session_state.get('plastic_pool', []))}, bio={len(st.session_state.get('bio_pool', []))}")
             page_nav(flow_df)
             return
         st.markdown(f"**{vignette.get('title_fi', '')}**")
@@ -645,7 +811,7 @@ def main():
     item_rows = visible_item_rows(items_df, item_ids)
 
     with st.form(f"form_{page_id}", clear_on_submit=False):
-        answers = render_page_items(page_id, page_title, item_rows, scale_map)
+        answers = render_page_items(page_id, page_title, item_rows, scale_map, construct_label_map)
         submit_label = "Tallenna ja jatka" if (page_id.endswith("FINAL") or "_V" in page_id) else "Jatka"
         submitted = st.form_submit_button(submit_label)
 
