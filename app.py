@@ -12,8 +12,6 @@ import streamlit as st
 # =============================
 st.set_page_config(page_title="Sustlife – Survey demo v1", layout="centered", initial_sidebar_state="collapsed")
 
-PRETEST_MODE = True
-
 st.markdown(
     """
     <style>
@@ -48,15 +46,7 @@ DATA_DIR = os.path.join(BASE_DIR, "data")
 os.makedirs(DATA_DIR, exist_ok=True)
 
 # Master driver workbook (keep in same folder as the app)
-DRIVER_CANDIDATES = [
-    "Suslife_master_driver_v5_flow_core_info.xlsx",
-    "Suslife_master_driver_v4_info_values_exact.xlsx",
-    "Suslife_master_driver_v4_info.xlsx",
-    "Suslife_master_driver_v2_harmonized_vignettes.xlsx",
-    "Suslife_master_driver_v2_checked.xlsx",
-    "Suslife_master_driver.xlsx",
-]
-DRIVER_XLSX = next((os.path.join(BASE_DIR, fn) for fn in DRIVER_CANDIDATES if os.path.exists(os.path.join(BASE_DIR, fn))), os.path.join(BASE_DIR, "Suslife_master_driver.xlsx"))
+DRIVER_XLSX = os.path.join(BASE_DIR, "Suslife_master_driver.xlsx")
 
 # Sheet names (fixed in the starter template)
 SHEET_ITEMS = "ITEMS"
@@ -492,7 +482,7 @@ def render_construct_blocks_matrix(item_rows: pd.DataFrame, scale_map: dict, pag
         # Optional: remove DK
         values = [v for v in values if str(v) != "99" and "en osaa" not in labels.get(v, "").lower()]
 
-        # title
+        # Keep pretest UI free of internal construct / abbreviation labels.
         with st.container(border=True):
             st.markdown(
                 "<div style='font-weight:600; margin-bottom:0.5rem;'>"
@@ -662,7 +652,7 @@ def render_item(item_row: pd.Series, context: dict, scale_map: dict):
             return None
 
         opts = [str(v.get("vignette_id","")) for v in pool]
-        labels = {str(v.get("vignette_id","")): (str(v.get('title_fi','')).strip() or 'Vaihtoehto') for v in pool}
+        labels = {str(v.get("vignette_id","")): str(v.get('title_fi','') or v.get('vignette_id','')) for v in pool}
 
         if response_type == "rank_select":
             return st.selectbox(q, opts, format_func=lambda x: labels.get(x, x), key=key)
@@ -767,7 +757,7 @@ except Exception as e:
     st.stop()
 
 st.title("Sustlife – Survey demo v1")
-st.caption("Esitestiversio projektitiimille.")
+st.caption("Kaikki ohjautuu yhdestä Excelistä: ITEMS + SCALES + MODEL + FLOW + VIGNETTES.")
 
 mode = st.sidebar.radio(
     "Näkymä",
@@ -807,8 +797,8 @@ if mode.startswith("Vignettes"):
         img_ref = extract_first_image_ref(vtext)
         img_file = os.path.basename(img_ref) if img_ref else "—"
 
-        st.markdown(f"**{title or vid}**")
-        st.caption(f"Image: {img_file}")
+        st.markdown(f"**{vid} – {title}**")
+        st.caption(f"Arm: {arm} | Stratum: {stratum} | Image: {img_file}")
 
         # Render full vignette (image + text). This uses the same renderer as the survey pages.
         render_markdown_with_media(vtext, BASE_DIR)
@@ -900,6 +890,9 @@ is_plastic_vignette_page = show_if == "LOOP_PLASTIC"
 is_bio_vignette_page = show_if == "LOOP_BIO"
 is_vignette_page = is_plastic_vignette_page or is_bio_vignette_page
 
+# st.sidebar.write("DEBUG page_id:", page_id)
+# st.sidebar.write("DEBUG tokens:", tokens)
+# st.sidebar.write("DEBUG driver:", DRIVER_XLSX)
 
 # -----------------------------
 # Vignette pages
@@ -916,6 +909,7 @@ if is_vignette_page:
             pool_ids = [f"{v.get('vignette_id')}({v.get('arm_id')})" for v in pool]
         except Exception:
             pool_ids = []
+        # debug caption hidden in pretest mode
 
         img_ref = extract_first_image_ref(str((context.get("vignette") or {}).get("text_fi","")))
         try:
@@ -930,275 +924,258 @@ if is_vignette_page:
         render_markdown_with_media(str((context.get("vignette") or {}).get("text_fi","")), BASE_DIR)
 
 
-    # QA preview hidden in pretest mode
-    if not PRETEST_MODE:
-        with st.sidebar.expander("Vignette previews (QA)", expanded=True):
-            pool = st.session_state.get("vignette_pool") or []
-            for i, v in enumerate(pool, start=1):
-                vid = v.get("vignette_id", "")
-                arm = v.get("arm_id", "")
-                wst = v.get("waste", "")
-                img_ref = extract_first_image_ref(str(v.get("text_fi", "")))
-                st.write(f"{i}. {vid} • {arm} • {wst}")
-                if img_ref:
-                    rel = img_ref.lstrip("/")
-                    img_path = os.path.join(BASE_DIR, rel)
-                    if os.path.exists(img_path):
-                        st.image(img_path, caption=os.path.basename(rel), use_container_width=True)
-                    else:
-                        st.caption(f"Missing: {img_path}")
-                else:
-                    st.caption("No image ref found")
+    # QA vignette preview sidebar hidden in pretest mode
 
-        # Select vignette for this page (and render it once).
-        if str(page_id).startswith("PL_V") or str(page_id).startswith("BIO_V"):
-            vignette, lane, idx, pool = get_vignette_for_page(page_id)
-            vpos = idx  # legacy index for logging
-            st.session_state["vignette_pos"] = vpos
+    # Select vignette for this page (and render it once).
+    if str(page_id).startswith("PL_V") or str(page_id).startswith("BIO_V"):
+        vignette, lane, idx, pool = get_vignette_for_page(page_id)
+        vpos = idx  # legacy index for logging
+        st.session_state["vignette_pos"] = vpos
 
-            if vignette is None:
-                st.warning(f"Huom: tälle ryhmälle löytyi vain {len(pool)}/3 tilannekuvaa. Tämä sivu ohitetaan.")
-                target_page = "PL_FINAL" if lane == "plastic" else ("BIO_FINAL" if lane == "bio" else None)
-                if target_page:
-                    target_idx = int(flow_df.index[flow_df["page_id"].astype(str) == target_page][0])
-                    if st.button("Jatka"):
-                        st.session_state["page_idx"] = target_idx
-                        scroll_to_top()
-                        st.rerun()
-                vignette = {"vignette_id": f"MISSING_{page_id}", "waste": "NA", "mech_ids": "", "title_fi": "", "text_fi": ""}
-        else:
-            vpos = st.session_state.get("vignette_pos", 0)
-            pool = st.session_state.get("vignette_pool", [])
-            vignette = pool[vpos] if (pool and vpos < len(pool)) else (pool[0] if pool else None)
-            lane, idx = None, vpos
-            if vignette is None:
-                vignette = {"vignette_id": f"MISSING_{page_id}", "waste": "NA", "mech_ids": "", "title_fi": "", "text_fi": ""}
-
-        # Render vignette content only on vignette pages
-        if is_vignette_page and isinstance(vignette, dict):
-            title = str(vignette.get("title_fi","")).strip()
-            if title:
-                st.markdown(f"**{title}**")
-            render_markdown_with_media(str(vignette.get("text_fi","")), BASE_DIR)
-
-        context = {
-            "page_id": page_id,
-            "waste": vignette.get("waste", "NA") if isinstance(vignette, dict) else "NA",
-            "vignette": vignette if isinstance(vignette, dict) else {},
-            "construct_label_map": construct_label_map,
-        }
-
-
-        # On vignette pages, use the vignette-specific constructs_to_show_items from VIGNETTES.
-        # Fallback to FLOW.items if the vignette row has no custom construct list.
-        tokens_for_page = list(tokens)
-        if is_vignette_page:
-            ctsi = (context.get("vignette") or {}).get("constructs_to_show_items") or (context.get("vignette") or {}).get("constructs_to_show") or ""
-            if str(ctsi).strip():
-                tokens_for_page = parse_items_list(str(ctsi))
-
-        # Expand MECH only when explicitly requested in the vignette token list
-        mech_ids = [x.strip() for x in str((context.get("vignette") or {}).get("mech_ids", "")).split("|") if x.strip()]
-        expanded = []
-        for t in tokens_for_page:
-            if t == "MECH":
-                expanded.extend(mech_ids)
-            else:
-                expanded.append(t)
-
-        item_rows = get_item_rows(items_df, expanded)
-        item_rows = item_rows.drop_duplicates(subset=["item_id"], keep="first").reset_index(drop=True)
-
-        shuffle_flag = bool(int(page.get("randomize_items_within_page", 0) or 0))
-        item_rows = maybe_shuffle_item_rows(item_rows, shuffle_flag)
-
-        # Optional: shuffle items within the page
-        shuffle_flag = bool(int(page.get("randomize_items_within_page", 0) or 0))
-        item_rows = maybe_shuffle_item_rows(item_rows, shuffle_flag)
-
-        vid_for_key = (vignette.get("vignette_id") if isinstance(vignette, dict) else None) or f"MISSING_{page_id}"
-        with st.form(f"form_{page_id}_{vid_for_key}", clear_on_submit=False):
-            answers = {}
-
-            # ✅ Detect matrix-worthy blocks (Likert constructs)
-            if not item_rows.empty and all(item_rows["scale_id"].str.upper().str.startswith("LIKERT")):
-                answers = render_construct_blocks_matrix(item_rows, scale_map, page_id, context)
-
-            else:
-                for _, r in item_rows.iterrows():
-                    answers[str(r["item_id"]).strip()] = render_item(r, context, scale_map)
-
-            submitted = st.form_submit_button("Tallenna ja jatka")
-
-        if submitted:
-            vpos = locals().get('vpos', 0)
-            st.session_state["answers"]["vignettes"].append({
-                "vignette_id": vignette["vignette_id"],
-                "stratum": vignette["stratum"],
-                "waste": vignette["waste"],
-                "responses": answers,
-                "shown_order_index": vpos + 1,
-            })
-
-            # advance vignette position and page
-            if st.session_state.get("vignette_pos", 0) < 3:
-                st.session_state["vignette_pos"] = st.session_state.get("vignette_pos", 0) + 1
-                st.session_state["page_idx"] += 1
-                scroll_to_top()
-                st.rerun()
-            else:
-                st.session_state["page_idx"] += 1
-                scroll_to_top()
-                st.rerun()
-    # -----------------------------
-    # Non-vignette pages
-    # -----------------------------
+        if vignette is None:
+            st.warning(f"Huom: tälle ryhmälle löytyi vain {len(pool)}/3 tilannekuvaa. Tämä sivu ohitetaan.")
+            target_page = "PL_FINAL" if lane == "plastic" else ("BIO_FINAL" if lane == "bio" else None)
+            if target_page:
+                target_idx = int(flow_df.index[flow_df["page_id"].astype(str) == target_page][0])
+                if st.button("Jatka"):
+                    st.session_state["page_idx"] = target_idx
+                    scroll_to_top()
+                    st.rerun()
+            vignette = {"vignette_id": f"MISSING_{page_id}", "waste": "NA", "mech_ids": "", "title_fi": "", "text_fi": ""}
     else:
-        item_rows = get_item_rows(items_df, tokens)
-        item_rows = item_rows.drop_duplicates(subset=["item_id"], keep="first").reset_index(drop=True)
+        vpos = st.session_state.get("vignette_pos", 0)
+        pool = st.session_state.get("vignette_pool", [])
+        vignette = pool[vpos] if (pool and vpos < len(pool)) else (pool[0] if pool else None)
+        lane, idx = None, vpos
+        if vignette is None:
+            vignette = {"vignette_id": f"MISSING_{page_id}", "waste": "NA", "mech_ids": "", "title_fi": "", "text_fi": ""}
 
-        shuffle_flag = bool(int(page.get("randomize_items_within_page", 0) or 0))
-        item_rows = maybe_shuffle_item_rows(item_rows, shuffle_flag)
+    # Render vignette content only on vignette pages
+    if is_vignette_page and isinstance(vignette, dict):
+        title = str(vignette.get("title_fi","")).strip()
+        if title:
+            st.markdown(f"**{title}**")
+        render_markdown_with_media(str(vignette.get("text_fi","")), BASE_DIR)
 
-        with st.form(f"form_{page_id}", clear_on_submit=False):
-            context = {
-                "page_id": page_id,
-                "_shown_anchors": set(),
-                "construct_label_map": construct_label_map,
-            "constructs_to_show_items": (context.get("vignette") or {}).get("constructs_to_show_items") or (context.get("vignette") or {}).get("constructs_to_show") or "",
-            }
-            # Inject vignette_pool for final ranking/choice rendering
-            if page_id.upper().startswith("P6") or "FINAL" in tokens:
-                context["vignette_pool"] = st.session_state.get("vignette_pool", [])
+    context = {
+        "page_id": page_id,
+        "waste": vignette.get("waste", "NA") if isinstance(vignette, dict) else "NA",
+        "vignette": vignette if isinstance(vignette, dict) else {},
+        "construct_label_map": construct_label_map,
+    }
 
-            answers = {}
 
-            # ✅ Use matrix for pages that are all Likert radios
-            is_all_likert = (
-                (not item_rows.empty)
-                and all(item_rows["response_type"].str.lower().isin(["radio", "likert"]))
-                and all(item_rows["scale_id"].str.upper().str.startswith("LIKERT"))
-            )
+    # On vignette pages, use the vignette-specific constructs_to_show_items from VIGNETTES.
+    # Fallback to FLOW.items if the vignette row has no custom construct list.
+    tokens_for_page = list(tokens)
+    if is_vignette_page:
+        ctsi = (context.get("vignette") or {}).get("constructs_to_show_items") or (context.get("vignette") or {}).get("constructs_to_show") or ""
+        if str(ctsi).strip():
+            tokens_for_page = parse_items_list(str(ctsi))
 
-            answers = {}
+    # Expand MECH only when explicitly requested in the vignette token list
+    mech_ids = [x.strip() for x in str((context.get("vignette") or {}).get("mech_ids", "")).split("|") if x.strip()]
+    expanded = []
+    for t in tokens_for_page:
+        if t == "MECH":
+            expanded.extend(mech_ids)
+        else:
+            expanded.append(t)
 
-            # If the page has multiple constructs and many Likert items, render as construct blocks matrix
-            has_many_likert = (
-                (not item_rows.empty)
-                and (item_rows["scale_id"].astype(str).str.upper().str.startswith("LIKERT")).sum() >= 3
-            )
+    item_rows = get_item_rows(items_df, expanded)
+    item_rows = item_rows.drop_duplicates(subset=["item_id"], keep="first").reset_index(drop=True)
 
-            if has_many_likert:
-                answers.update(render_construct_blocks_matrix(item_rows, scale_map, page_id, context))
+    shuffle_flag = bool(int(page.get("randomize_items_within_page", 0) or 0))
+    item_rows = maybe_shuffle_item_rows(item_rows, shuffle_flag)
 
-            # Render any remaining non-Likert items normally
+    # Optional: shuffle items within the page
+    shuffle_flag = bool(int(page.get("randomize_items_within_page", 0) or 0))
+    item_rows = maybe_shuffle_item_rows(item_rows, shuffle_flag)
+
+    vid_for_key = (vignette.get("vignette_id") if isinstance(vignette, dict) else None) or f"MISSING_{page_id}"
+    with st.form(f"form_{page_id}_{vid_for_key}", clear_on_submit=False):
+        answers = {}
+
+        # ✅ Detect matrix-worthy blocks (Likert constructs)
+        if not item_rows.empty and all(item_rows["scale_id"].str.upper().str.startswith("LIKERT")):
+            answers = render_construct_blocks_matrix(item_rows, scale_map, page_id, context)
+
+        else:
             for _, r in item_rows.iterrows():
-                item_id = str(r["item_id"]).strip()
-                if item_id in answers:   # already rendered in matrix
-                    continue
-                answers[item_id] = render_item(r, context, scale_map)
+                answers[str(r["item_id"]).strip()] = render_item(r, context, scale_map)
 
-            submitted = st.form_submit_button("Jatka")
+        submitted = st.form_submit_button("Tallenna ja jatka")
 
-        if submitted:
-            # --- Consent gate: if page includes CONSENT, require it ---
-            if "CONSENT" in tokens:
-                consent_val = None
-                for k, v in st.session_state.items():
-                    if k.endswith("_CONSENT"):
-                        consent_val = v
-                if not consent_val:
-                    st.error("Tarvitsen suostumuksen jatkaakseni.")
-                    st.stop()
+    if submitted:
+        vpos = locals().get('vpos', 0)
+        st.session_state["answers"]["vignettes"].append({
+            "vignette_id": vignette["vignette_id"],
+            "stratum": vignette["stratum"],
+            "waste": vignette["waste"],
+            "responses": answers,
+            "shown_order_index": vpos + 1,
+        })
 
-                    # --- Values page rule (exactly two 7s) ---
-            if not values_exact_two_sevens(items_df):
-                st.stop()
-
-    # --- Routing: if page contains AREA_TYPE + HOUSING, initialize pool & meta ---
-            if "AREA_TYPE" in tokens and "HOUSING" in tokens:
-                ensure_vignette_pool(flow_df, vigs_df, scale_map)
-
-                st.session_state["answers"].setdefault("meta", {})
-                st.session_state["answers"]["meta"].update({
-                    "respondent_id": st.session_state["respondent_id"],
-                    "timestamp_start": st.session_state["answers"]["meta"].get("timestamp_start") or datetime.now().isoformat(),
-                    "stratum": st.session_state.get("stratum"),
-                    "target_waste": st.session_state.get("target_waste"),
-                })
-
-            # --- Frequencies: store whenever those items appear (P1 or P2 etc.) ---
-            if "FREQ_PL" in tokens or "FREQ_BIO" in tokens:
-                st.session_state["answers"].setdefault("core", {})
-
-                if "FREQ_PL" in tokens:
-                    freq_pl = None
-                    for k, v in st.session_state.items():
-                        if k.endswith("_FREQ_PL") and v is not None:
-                            freq_pl = v
-                    st.session_state["answers"]["core"]["freq_plastic"] = freq_pl
-
-                if "FREQ_BIO" in tokens:
-                    freq_bio = None
-                    for k, v in st.session_state.items():
-                        if k.endswith("_FREQ_BIO") and v is not None:
-                            freq_bio = v
-                    st.session_state["answers"]["core"]["freq_bio"] = freq_bio
-
-            # --- Final page detection ---
-            is_final_page = (str(page_id).endswith("_FINAL") or any(t in tokens for t in ["RANK1","RANK2","RANK3","CHOICE","WHY"]))
-            if is_final_page:
-                r1 = get_state_ending("_RANK1")
-                r2 = get_state_ending("_RANK2")
-                r3 = get_state_ending("_RANK3")
-
-                if r1 and r2 and r3 and len({r1, r2, r3}) < 3:
-                    st.error("Rankingissa sama toimenpide ei voi olla usealla sijalla. Valitse kolme eri.")
-                    st.stop()
-
-                choice = get_state_ending("_CHOICE")
-                if choice is not None:
-                    st.session_state["answers"]["final"] = {
-                        "ranking": {"1": r1, "2": r2, "3": r3},
-                        "forced_choice": choice,
-                        "open_rationale": (get_state_ending("_WHY") or "").strip(),
-                        "timestamp_end": datetime.now().isoformat(),
-                    }
-                    path = save_jsonl(st.session_state["answers"])
-                    st.success(f"Kiitos! Vastaukset tallennettu tiedostoon: {path}")
-                    st.session_state["answers"]["meta"]["saved_path"] = path
-                    with open(path, "rb") as f:
-                        st.download_button(
-                            "Lataa vastaukset (JSONL)",
-                            f,
-                            file_name=os.path.basename(path),
-                            mime="application/jsonl",
-                        )
-                    st.stop()
-
+        # advance vignette position and page
+        if st.session_state.get("vignette_pos", 0) < 3:
+            st.session_state["vignette_pos"] = st.session_state.get("vignette_pos", 0) + 1
             st.session_state["page_idx"] += 1
             scroll_to_top()
             st.rerun()
+        else:
+            st.session_state["page_idx"] += 1
+            scroll_to_top()
+            st.rerun()
+# -----------------------------
+# Non-vignette pages
+# -----------------------------
+else:
+    item_rows = get_item_rows(items_df, tokens)
+    item_rows = item_rows.drop_duplicates(subset=["item_id"], keep="first").reset_index(drop=True)
 
-    # -----------------------------
-    # Navigation
-    # -----------------------------
-    st.markdown("---")
-    cols = st.columns([1, 1, 2])
-    with cols[0]:
-        if st.button("Takaisin", disabled=st.session_state["page_idx"] == 0):
-            if is_vignette_page and st.session_state.get("vignette_pos", 0) > 0:
-                st.session_state["vignette_pos"] = st.session_state.get("vignette_pos", 0) - 1
-            st.session_state["page_idx"] = max(0, st.session_state["page_idx"] - 1)
-            scroll_to_top()
-            st.rerun()
-    with cols[1]:
-        if st.button("Aloita alusta"):
-            for k in list(st.session_state.keys()):
-                del st.session_state[k]
-            scroll_to_top()
-            st.rerun()
-    with cols[2]:
-        st.caption(
-            f"Page {st.session_state['page_idx']+1}/{len(flow_df)} • Stratum: {st.session_state.get('stratum')} • Pool: 3 plastic + 3 bio"
+    shuffle_flag = bool(int(page.get("randomize_items_within_page", 0) or 0))
+    item_rows = maybe_shuffle_item_rows(item_rows, shuffle_flag)
+
+    with st.form(f"form_{page_id}", clear_on_submit=False):
+        context = {
+            "page_id": page_id,
+            "_shown_anchors": set(),
+            "construct_label_map": construct_label_map,
+        "constructs_to_show_items": (context.get("vignette") or {}).get("constructs_to_show_items") or (context.get("vignette") or {}).get("constructs_to_show") or "",
+        }
+        # Inject vignette_pool for final ranking/choice rendering
+        if page_id.upper().startswith("P6") or "FINAL" in tokens:
+            context["vignette_pool"] = st.session_state.get("vignette_pool", [])
+
+        answers = {}
+
+        # ✅ Use matrix for pages that are all Likert radios
+        is_all_likert = (
+            (not item_rows.empty)
+            and all(item_rows["response_type"].str.lower().isin(["radio", "likert"]))
+            and all(item_rows["scale_id"].str.upper().str.startswith("LIKERT"))
+        )
+
+        answers = {}
+
+        # If the page has multiple constructs and many Likert items, render as construct blocks matrix
+        has_many_likert = (
+            (not item_rows.empty)
+            and (item_rows["scale_id"].astype(str).str.upper().str.startswith("LIKERT")).sum() >= 3
+        )
+
+        if has_many_likert:
+            answers.update(render_construct_blocks_matrix(item_rows, scale_map, page_id, context))
+
+        # Render any remaining non-Likert items normally
+        for _, r in item_rows.iterrows():
+            item_id = str(r["item_id"]).strip()
+            if item_id in answers:   # already rendered in matrix
+                continue
+            answers[item_id] = render_item(r, context, scale_map)
+
+        submitted = st.form_submit_button("Jatka")
+
+    if submitted:
+        # --- Consent gate: if page includes CONSENT, require it ---
+        if "CONSENT" in tokens:
+            consent_val = None
+            for k, v in st.session_state.items():
+                if k.endswith("_CONSENT"):
+                    consent_val = v
+            if not consent_val:
+                st.error("Tarvitsen suostumuksen jatkaakseni.")
+                st.stop()
+
+                # --- Values page rule (exactly two 7s) ---
+        if not values_exact_two_sevens(items_df):
+            st.stop()
+
+# --- Routing: if page contains AREA_TYPE + HOUSING, initialize pool & meta ---
+        if "AREA_TYPE" in tokens and "HOUSING" in tokens:
+            ensure_vignette_pool(flow_df, vigs_df, scale_map)
+
+            st.session_state["answers"].setdefault("meta", {})
+            st.session_state["answers"]["meta"].update({
+                "respondent_id": st.session_state["respondent_id"],
+                "timestamp_start": st.session_state["answers"]["meta"].get("timestamp_start") or datetime.now().isoformat(),
+                "stratum": st.session_state.get("stratum"),
+                "target_waste": st.session_state.get("target_waste"),
+            })
+
+        # --- Frequencies: store whenever those items appear (P1 or P2 etc.) ---
+        if "FREQ_PL" in tokens or "FREQ_BIO" in tokens:
+            st.session_state["answers"].setdefault("core", {})
+
+            if "FREQ_PL" in tokens:
+                freq_pl = None
+                for k, v in st.session_state.items():
+                    if k.endswith("_FREQ_PL") and v is not None:
+                        freq_pl = v
+                st.session_state["answers"]["core"]["freq_plastic"] = freq_pl
+
+            if "FREQ_BIO" in tokens:
+                freq_bio = None
+                for k, v in st.session_state.items():
+                    if k.endswith("_FREQ_BIO") and v is not None:
+                        freq_bio = v
+                st.session_state["answers"]["core"]["freq_bio"] = freq_bio
+
+        # --- Final page detection ---
+        is_final_page = (str(page_id).endswith("_FINAL") or any(t in tokens for t in ["RANK1","RANK2","RANK3","CHOICE","WHY"]))
+        if is_final_page:
+            r1 = get_state_ending("_RANK1")
+            r2 = get_state_ending("_RANK2")
+            r3 = get_state_ending("_RANK3")
+
+            if r1 and r2 and r3 and len({r1, r2, r3}) < 3:
+                st.error("Rankingissa sama toimenpide ei voi olla usealla sijalla. Valitse kolme eri.")
+                st.stop()
+
+            choice = get_state_ending("_CHOICE")
+            if choice is not None:
+                st.session_state["answers"]["final"] = {
+                    "ranking": {"1": r1, "2": r2, "3": r3},
+                    "forced_choice": choice,
+                    "open_rationale": (get_state_ending("_WHY") or "").strip(),
+                    "timestamp_end": datetime.now().isoformat(),
+                }
+                path = save_jsonl(st.session_state["answers"])
+                st.success(f"Kiitos! Vastaukset tallennettu tiedostoon: {path}")
+                st.session_state["answers"]["meta"]["saved_path"] = path
+                with open(path, "rb") as f:
+                    st.download_button(
+                        "Lataa vastaukset (JSONL)",
+                        f,
+                        file_name=os.path.basename(path),
+                        mime="application/jsonl",
+                    )
+                st.stop()
+
+        st.session_state["page_idx"] += 1
+        scroll_to_top()
+        st.rerun()
+# st.sidebar.write("DEBUG items on page:", item_rows[["item_id", "response_type"]].to_dict("records"))
+
+# -----------------------------
+# Navigation
+# -----------------------------
+st.markdown("---")
+cols = st.columns([1, 1, 2])
+with cols[0]:
+    if st.button("Takaisin", disabled=st.session_state["page_idx"] == 0):
+        if is_vignette_page and st.session_state.get("vignette_pos", 0) > 0:
+            st.session_state["vignette_pos"] = st.session_state.get("vignette_pos", 0) - 1
+        st.session_state["page_idx"] = max(0, st.session_state["page_idx"] - 1)
+        scroll_to_top()
+        st.rerun()
+with cols[1]:
+    if st.button("Aloita alusta"):
+        for k in list(st.session_state.keys()):
+            del st.session_state[k]
+        scroll_to_top()
+        st.rerun()
+with cols[2]:
+    st.caption(
+        f"Page {st.session_state['page_idx']+1}/{len(flow_df)} • Stratum: {st.session_state.get('stratum')} • Pool: 3 plastic + 3 bio"
     )
