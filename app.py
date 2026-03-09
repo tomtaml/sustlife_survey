@@ -182,6 +182,14 @@ def load_driver(path: str):
     return items, flow, vigs, model, scale_map, construct_label_map
 
 
+def save_jsonl(payload: dict) -> str:
+    ts = datetime.now().strftime("%Y%m%d_%H%M%S")
+    filename = f"suslife_v2_{ts}_{st.session_state['respondent_id'][:8]}.jsonl"
+    path = os.path.join(DATA_DIR, filename)
+    with open(path, "a", encoding="utf-8") as f:
+        f.write(json.dumps(payload, ensure_ascii=False) + "\n")
+    return path
+
 
 
 def get_label_for_value(scale_map: dict, scale_id: str, value):
@@ -200,13 +208,62 @@ def get_label_for_value(scale_map: dict, scale_id: str, value):
             return lbl
     return value
 
-def save_jsonl(payload: dict) -> str:
-    ts = datetime.now().strftime("%Y%m%d_%H%M%S")
-    filename = f"suslife_v2_{ts}_{st.session_state['respondent_id'][:8]}.jsonl"
-    path = os.path.join(DATA_DIR, filename)
-    with open(path, "a", encoding="utf-8") as f:
-        f.write(json.dumps(payload, ensure_ascii=False) + "\n")
-    return path
+
+def build_submission_payload(scale_map: dict) -> dict:
+    answers = st.session_state.get("answers", {})
+    meta = answers.get("meta", {}) or {}
+    core = answers.get("core", {}) or {}
+    final = answers.get("final", {}) or {}
+
+    area_val = meta.get("area_type", core.get("AREA_TYPE"))
+    housing_val = meta.get("housing", core.get("HOUSING"))
+    compost_val = meta.get("compost", core.get("COMPOST"))
+    bio_anchor = meta.get("bio_sort_anchor", core.get("BIO_SORT_ANCHOR"))
+
+    try:
+        is_active_composter = bool((compost_val in (1, "1", True, "Kyllä", "kyllä")) and (bio_anchor in (1, "1", 2, "2", True)))
+    except Exception:
+        is_active_composter = False
+
+    plastic_final = final.get("plastic", {}) or {}
+    bio_final = final.get("bio", {}) or {}
+
+    payload_answers = json.loads(json.dumps(answers, ensure_ascii=False, default=str))
+
+    return {
+        "submitted_at": datetime.now().isoformat(),
+        "respondent_id": st.session_state.get("respondent_id", ""),
+        "stratum": meta.get("stratum") or st.session_state.get("stratum", ""),
+        "area_type": meta.get("area_type_label") or get_label_for_value(scale_map, "AREA_TYPES", area_val) or "",
+        "housing": meta.get("housing_label") or get_label_for_value(scale_map, "HOUSING_TYPES", housing_val) or "",
+        "is_active_composter": is_active_composter,
+        "plastic_choice": plastic_final.get("forced_choice", ""),
+        "bio_choice": bio_final.get("forced_choice", ""),
+        "payload_json": json.dumps(payload_answers, ensure_ascii=False),
+        "answers": payload_answers,
+    }
+
+
+def save_to_apps_script(payload: dict):
+    try:
+        url = st.secrets.get("apps_script", {}).get("url", "").strip()
+    except Exception:
+        url = ""
+    if not url:
+        return False, "Apps Script URL puuttuu Streamlit-secretsistä."
+
+    try:
+        response = requests.post(url, json=payload, timeout=20)
+        response.raise_for_status()
+        try:
+            data = response.json()
+        except Exception:
+            return True, "Tallennus onnistui, mutta vastaus ei ollut JSON."
+        if data.get("ok") is True:
+            return True, "Tallennus onnistui."
+        return False, data.get("error", "Tuntematon Apps Script -virhe.")
+    except Exception as e:
+        return False, str(e)
 
 def get_state_ending(suffix: str):
     for k, v in st.session_state.items():
