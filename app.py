@@ -21,10 +21,25 @@ st.markdown(
     unsafe_allow_html=True,
 )
 
-BASE_DIR = os.path.dirname(os.path.abspath(__file__)) if "__file__" in globals() else "/mnt/data"
+BASE_DIR = os.path.dirname(os.path.abspath(__file__)) if "__file__" in globals() else os.getcwd()
 DATA_DIR = os.path.join(BASE_DIR, "data")
 os.makedirs(DATA_DIR, exist_ok=True)
-DRIVER_XLSX = os.path.join(BASE_DIR, "Suslife_master_driver.xlsx")
+
+
+def resolve_driver_path() -> str:
+    candidates = [
+        "Suslife_master_driver_v2_harmonized_vignettes.xlsx",
+        "Suslife_master_driver_v2_checked.xlsx",
+        "Suslife_master_driver.xlsx",
+    ]
+    for name in candidates:
+        path = os.path.join(BASE_DIR, name)
+        if os.path.exists(path):
+            return path
+    return os.path.join(BASE_DIR, "Suslife_master_driver.xlsx")
+
+
+DRIVER_XLSX = resolve_driver_path()
 
 SHEET_ITEMS = "ITEMS"
 SHEET_SCALES = "SCALES"
@@ -533,13 +548,14 @@ def write_order_check(flow_df: pd.DataFrame):
 def main():
     init_state()
     items_df, flow_df, vigs_df, model_df, scale_map, construct_label_map = load_driver(DRIVER_XLSX)
-    order_path = write_order_check(flow_df)
+    order_check_md = build_order_check(flow_df)
 
     st.title("Sustlife – Survey demo v2")
-    st.caption("v2: fixed driver loading, updated general construct order, and vignette pages limited to VIG_CORE.")
+    st.caption(f"v2: fixed driver loading, updated general construct order, vignette pages limited to VIG_CORE, and loaded workbook: {os.path.basename(DRIVER_XLSX)}")
 
     mode = st.sidebar.radio("Näkymä", ["Survey", "Vignettes – Plastic", "Vignettes – Biowaste"], index=0)
-    st.sidebar.markdown(f"[Order check report]({order_path})")
+    with st.sidebar.expander("Order check report", expanded=False):
+        st.markdown(order_check_md)
 
     if mode != "Survey":
         waste = "plastic" if "Plastic" in mode else "bio"
