@@ -1437,6 +1437,10 @@ st.subheader(title_fi if title_fi else page_id)
 # ---------------------------------------------------------
 # Vignette pages
 # ---------------------------------------------------------
+
+st.write("VIGNETTE TOKENS:", items_for_page)
+st.write("VIGNETTE ITEM IDS:", item_rows["item_id"].astype(str).tolist())
+
 is_vignette_page = bool(re.match(r"^(PL|BIO)_V\d+$", page_id.strip().upper()))
 if is_vignette_page:
     ensure_vignette_pool(vigs_df, scale_map)
@@ -1456,6 +1460,10 @@ if is_vignette_page:
         item_rows.drop_duplicates(subset=["item_id"], keep="first")
         .reset_index(drop=True)
     )
+
+    st.write("VIGNETTE TOKENS:", items_for_page)
+    st.write("VIGNETTE ITEM IDS:", item_rows["item_id"].astype(str).tolist())
+
 
     with st.form(f"form_{page_id}_{vignette.get('vignette_id', '')}", clear_on_submit=False):
         answers = {}
