@@ -804,7 +804,7 @@ def render_horizontal_radio(question: str, values: list[str], labels: dict[str, 
 
 
 def render_item(item_row: pd.Series, context: dict, scale_map: dict):
-    item_id = str(item_row["item_id"]).strip()
+    item_id = str(item_row.get("item_id", "")).strip()
     response_type = str(item_row.get("response_type", "")).strip().lower()
     scale_id = str(item_row.get("scale_id", "")).strip()
     question = str(item_row.get("question_fi", "")).strip()
@@ -817,6 +817,30 @@ def render_item(item_row: pd.Series, context: dict, scale_map: dict):
 
     options = get_scale_options(scale_map, scale_id)
 
+    # Skip truly empty rows instead of creating a blank text box
+    if not item_id and not question and not response_type:
+        return None
+
+    # Force known intro/display items to render as info even if workbook typing is inconsistent
+    force_info_items = {
+        "INTRO_PL",
+        "INTRO_BIO",
+        "PL_LOOP_INTRO",
+        "BIO_LOOP_INTRO",
+        "INFO_INTRO",
+        "END_TEXT",
+        "INSTR_ATT_G",
+        "INSTR_SN_G",
+        "INSTR_SKILL_G",
+        "INSTR_NFC_G",
+        "INSTR_VALUES",
+    }
+    if item_id in force_info_items:
+        render_markdown_with_media(question)
+        if help_fi:
+            st.caption(help_fi)
+        return None
+
     if item_id == "CONSENT":
         st.session_state[key] = True
         return True
@@ -827,28 +851,24 @@ def render_item(item_row: pd.Series, context: dict, scale_map: dict):
         elif context.get("waste") == "bio":
             question = "Tämä lisäisi omaa biojätteen lajitteluani."
 
-    if response_type in {"radio", "select_one", "single", "likert"} and options:
-        values = [str(v) for v, _ in options]
-        labels = {str(v): label for v, label in options}
-
-        show_numeric_only = str(scale_id).upper().startswith("LIKERT")
-
-        return st.radio(
-            question,
-            values,
-            format_func=(lambda x: str(x)) if show_numeric_only else (lambda x: labels.get(str(x), str(x))),
-            key=key,
-            horizontal=True,
-            help=help_fi or None,
-        )
+    if response_type in {"info", "markdown", "display", "intro"}:
+        render_markdown_with_media(question)
+        if help_fi:
+            st.caption(help_fi)
+        return None
 
     if response_type == "checkbox":
         return st.checkbox(question, key=key, help=help_fi or None)
 
     if response_type in {"text", "textarea", "open"}:
+        # avoid blank unlabeled text inputs
+        if not question:
+            return None
         return st.text_area(question, key=key, help=help_fi or None)
 
     if response_type in {"number", "numeric"}:
+        if not question:
+            return None
         return st.text_input(question, key=key, help=help_fi or None)
 
     if response_type == "slider":
@@ -882,10 +902,13 @@ def render_item(item_row: pd.Series, context: dict, scale_map: dict):
     if response_type in {"radio", "select_one", "single", "likert"} and options:
         values = [str(v) for v, _ in options]
         labels = {str(v): label for v, label in options}
+
+        show_numeric_only = str(scale_id).upper().startswith("LIKERT")
+
         return st.radio(
             question,
             values,
-            format_func=lambda x: labels.get(str(x), str(x)),
+            format_func=(lambda x: str(x)) if show_numeric_only else (lambda x: labels.get(str(x), str(x))),
             key=key,
             horizontal=True,
             help=help_fi or None,
@@ -902,8 +925,11 @@ def render_item(item_row: pd.Series, context: dict, scale_map: dict):
             help=help_fi or None,
         )
 
-    return st.text_input(question or item_id, key=key, help=help_fi or None)
+    # Final fallback: only show text input if there is actually a question label
+    if question:
+        return st.text_input(question, key=key, help=help_fi or None)
 
+    return None
 
 def render_construct_blocks_matrix(
     item_rows: pd.DataFrame,
@@ -1424,22 +1450,41 @@ if is_vignette_page:
 
     items_for_page = parse_items_list(vignette.get("constructs_to_show_items", "")) or tokens
     item_rows = get_item_rows_by_tokens(items_df, items_for_page)
-    item_rows = item_rows.drop_duplicates(subset=["item_id"], keep="first").reset_index(drop=True)
+
+    # hard dedupe before any rendering
+    item_rows = (
+        item_rows.drop_duplicates(subset=["item_id"], keep="first")
+        .reset_index(drop=True)
+    )
 
     with st.form(f"form_{page_id}_{vignette.get('vignette_id', '')}", clear_on_submit=False):
         answers = {}
 
-        matrix_rows = pd.DataFrame(columns=item_rows.columns)
-        non_matrix_rows = item_rows.copy()
+        # only real multi-item likert blocks go to matrix rendering
+        matrix_mask = (
+            item_rows["response_type"].astype(str).str.lower().isin(["radio", "likert", "single", "select_one"])
+            & item_rows["scale_id"].astype(str).str.upper().str.startswith("LIKERT")
+            & item_rows["construct_id"].astype(str).str.strip().ne("")
+        )
 
-        if not item_rows.empty:
-            matrix_mask = (
-                item_rows["response_type"].astype(str).str.lower().isin(["radio", "likert", "single", "select_one"])
-                & item_rows["scale_id"].astype(str).str.upper().str.startswith("LIKERT")
-                & item_rows["construct_id"].astype(str).str.strip().ne("")
-            )
-            matrix_rows = item_rows[matrix_mask].copy()
-            non_matrix_rows = item_rows[~matrix_mask].copy()
+        matrix_rows = item_rows[matrix_mask].copy()
+        matrix_rows = matrix_rows.drop_duplicates(subset=["item_id"], keep="first").reset_index(drop=True)
+
+        # render matrix only for constructs with 2+ rows
+        valid_constructs = (
+            matrix_rows.groupby("construct_id")["item_id"].count()
+            .loc[lambda s: s >= 2]
+            .index
+            .tolist()
+        )
+        matrix_rows = matrix_rows[matrix_rows["construct_id"].isin(valid_constructs)].copy()
+
+        rendered_ids = set(matrix_rows["item_id"].astype(str).tolist())
+        non_matrix_rows = (
+            item_rows[~item_rows["item_id"].astype(str).isin(rendered_ids)]
+            .drop_duplicates(subset=["item_id"], keep="first")
+            .reset_index(drop=True)
+        )
 
         if not matrix_rows.empty:
             answers.update(
