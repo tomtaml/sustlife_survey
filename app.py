@@ -985,7 +985,7 @@ def get_info_card_rank_options() -> list[tuple[str, str]]:
     ]
 
 
-def render_info_ranking_page(page_id: str):
+def render_info_ranking_page(page_id: str, scale_map: dict):
     st.markdown("### Tietokorttien hyödyllisyysjärjestys")
     st.markdown("Aseta tietokortit järjestykseen hyödyllisimmästä vähiten hyödylliseen.")
 
@@ -1572,7 +1572,7 @@ if contains_info_cards:
 
     elif step[0] == "ranking_simple":
         with st.form(f"form_{page_id}_ranking_simple", clear_on_submit=False):
-            ranking_answers = render_info_ranking_page(page_id)
+            ranking_answers = render_info_ranking_page(page_id, scale_map)
             submitted = st.form_submit_button("Tallenna ja jatka")
 
         if submitted:
