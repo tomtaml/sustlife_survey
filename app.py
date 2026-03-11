@@ -1450,6 +1450,7 @@ if is_vignette_page:
 
     items_for_page = parse_items_list(vignette.get("constructs_to_show_items", "")) or tokens
     item_rows = get_item_rows_by_tokens(items_df, items_for_page)
+
     item_rows = (
         item_rows.drop_duplicates(subset=["item_id"], keep="first")
         .reset_index(drop=True)
@@ -1461,7 +1462,8 @@ if is_vignette_page:
     with st.form(f"form_{page_id}_{vignette.get('vignette_id', '')}", clear_on_submit=False):
         answers = {}
 
-        # IMPORTANT: render each vignette item exactly once
+        # Render each vignette item exactly once in flow order.
+        # No matrix renderer on vignette pages.
         for _, row in item_rows.iterrows():
             item_id = str(row["item_id"]).strip()
             answers[item_id] = render_item(
