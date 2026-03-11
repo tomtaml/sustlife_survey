@@ -268,7 +268,7 @@ def maybe_shuffle_item_rows(item_rows: pd.DataFrame, shuffle_flag: bool) -> pd.D
 # Media rendering
 # =========================================================
 def normalize_media_path(path_text: str) -> Path:
-    raw = str(path_text or "").strip().replace("\\", "/").lstrip("/")
+    raw = str(path_text or "").strip().strip('"').strip("'").replace("\\", "/").lstrip("/")
     return BASE_DIR / raw
 
 
@@ -281,7 +281,18 @@ def split_first_image_and_text(raw_text: str) -> tuple[Path | None, str]:
     if md_match:
         img_ref = md_match.group(1).strip()
         img_path = normalize_media_path(img_ref)
-        cleaned = re.sub(r"!\[[^\]]*\]\(([^)]+)\)", "", text, count=1).strip()
+
+        start, end = md_match.span()
+        before = text[:start].strip()
+        after = text[end:].strip()
+
+        remaining_parts = []
+        if before:
+            remaining_parts.append(before)
+        if after:
+            remaining_parts.append(after)
+
+        cleaned = "\n\n".join(remaining_parts).strip()
         return (img_path if img_path.exists() else None), cleaned
 
     lines = text.splitlines()
@@ -314,16 +325,38 @@ def render_markdown_with_media(text: str) -> None:
     lines = raw.splitlines()
     kept_lines = []
 
-    for line in lines:
-        stripped = line.strip()
+    img_pattern = re.compile(r"!\[[^\]]*\]\(([^)]+)\)")
 
-        md_match = re.fullmatch(r"!\[[^\]]*\]\(([^)]+)\)", stripped)
-        if md_match:
-            img_path = normalize_media_path(md_match.group(1))
-            if img_path.exists():
-                st.image(str(img_path), use_container_width=True)
+    for line in lines:
+        working = line
+        matches = list(img_pattern.finditer(line))
+
+        if matches:
+            last_end = 0
+            text_parts = []
+
+            for m in matches:
+                img_ref = m.group(1).strip()
+                img_path = normalize_media_path(img_ref)
+                if img_path.exists():
+                    st.image(str(img_path), use_container_width=True)
+
+                before = working[last_end:m.start()]
+                if before.strip():
+                    text_parts.append(before.strip())
+
+                last_end = m.end()
+
+            after = working[last_end:]
+            if after.strip():
+                text_parts.append(after.strip())
+
+            combined_text = " ".join(text_parts).strip()
+            if combined_text:
+                kept_lines.append(combined_text)
             continue
 
+        stripped = line.strip()
         if stripped.lower().endswith((".png", ".jpg", ".jpeg", ".webp")) and (
             stripped.startswith("/media/") or stripped.startswith("media/")
         ):
@@ -768,6 +801,8 @@ def render_item(item_row: pd.Series, context: dict, scale_map: dict):
     if isinstance(vignette, dict) and vignette.get("vignette_id"):
         key = f"{vignette['vignette_id']}_{item_id}"
 
+    options = get_scale_options(scale_map, scale_id)
+
     if item_id == "CONSENT":
         st.session_state[key] = True
         return True
@@ -778,17 +813,11 @@ def render_item(item_row: pd.Series, context: dict, scale_map: dict):
         elif context.get("waste") == "bio":
             question = "Tämä lisäisi omaa biojätteen lajitteluani."
 
-    if response_type in {"radio", "select_one", "single", "likert"} and options:
-        values = [str(v) for v, _ in options]
-        labels = {str(v): label for v, label in options}
-        return st.radio(
-            question,
-            values,
-            format_func=lambda x: labels.get(str(x), str(x)),
-            key=key,
-            horizontal=True,
-            help=help_fi or None,
-        )
+    if response_type in {"info", "markdown", "display", "intro"}:
+        render_markdown_with_media(question)
+        if help_fi:
+            st.caption(help_fi)
+        return None
 
     if response_type == "checkbox":
         return st.checkbox(question, key=key, help=help_fi or None)
@@ -818,18 +847,37 @@ def render_item(item_row: pd.Series, context: dict, scale_map: dict):
         }
         if response_type == "rank_select":
             return st.selectbox(question, values, format_func=lambda x: labels.get(x, x), key=key)
-        return render_horizontal_radio(question, values, labels, key, help_fi)
+        return st.radio(
+            question,
+            values,
+            format_func=lambda x: labels.get(str(x), str(x)),
+            key=key,
+            horizontal=True,
+            help=help_fi or None,
+        )
 
-    options = get_scale_options(scale_map, scale_id)
     if response_type in {"radio", "select_one", "single", "likert"} and options:
         values = [str(v) for v, _ in options]
         labels = {str(v): label for v, label in options}
-        return render_horizontal_radio(question, values, labels, key, help_fi)
+        return st.radio(
+            question,
+            values,
+            format_func=lambda x: labels.get(str(x), str(x)),
+            key=key,
+            horizontal=True,
+            help=help_fi or None,
+        )
 
     if response_type == "selectbox" and options:
         values = [str(v) for v, _ in options]
         labels = {str(v): label for v, label in options}
-        return st.selectbox(question, values, format_func=lambda x: labels.get(str(x), str(x)), key=key)
+        return st.selectbox(
+            question,
+            values,
+            format_func=lambda x: labels.get(str(x), str(x)),
+            key=key,
+            help=help_fi or None,
+        )
 
     return st.text_input(question or item_id, key=key, help=help_fi or None)
 
