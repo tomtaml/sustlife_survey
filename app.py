@@ -1598,10 +1598,12 @@ else:
     with st.form(f"form_{page_id}", clear_on_submit=False):
         answers = {}
 
+        use_matrix = page_id not in {"P8B_INFRA"}
+
         matrix_rows = pd.DataFrame(columns=item_rows.columns)
         non_matrix_rows = item_rows.copy()
 
-        if not item_rows.empty:
+        if use_matrix and not item_rows.empty:
             matrix_mask = (
                 item_rows["response_type"].astype(str).str.lower().isin(["radio", "likert", "single", "select_one"])
                 & item_rows["scale_id"].astype(str).str.upper().str.startswith("LIKERT")
@@ -1641,6 +1643,20 @@ else:
 
         submitted = st.form_submit_button("Jatka")
 
+    if submitted:
+        if "CONSENT" in tokens:
+            answers["CONSENT"] = True
+
+        if not values_exact_two_sevens(item_rows):
+            st.stop()
+
+        answers_clean = {k: v for k, v in answers.items() if v is not None}
+        finalize_standard_page(page_id, tokens, answers_clean, item_rows, scale_map, vigs_df)
+
+        # Explicitly move to next page
+        st.session_state["page_idx"] = int(st.session_state["page_idx"]) + 1
+        scroll_to_top()
+        st.rerun()
 
 # =========================================================
 # Navigation
