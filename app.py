@@ -1019,8 +1019,7 @@ def build_info_steps(intro_rows, cards, ranking_rows):
         steps.append(("intro", intro_rows))
     for idx, card in enumerate(cards, start=1):
         steps.append(("card", idx, card))
-    if ranking_rows:
-        steps.append(("ranking", ranking_rows))
+    steps.append(("ranking_simple", ranking_rows))
     return steps
 
 
@@ -1044,6 +1043,47 @@ def render_info_card_step(page_id: str, step_idx: int, card: dict, scale_map: di
 
     return answers
 
+def get_info_card_rank_options(scale_map: dict) -> list[tuple[str, str]]:
+    preferred = [
+        ("INFO_CARD1", "Tietokortti 1 – Palvelu ja saavutettavuus"),
+        ("INFO_CARD2", "Tietokortti 2 – Hyöty ja kiertotalousvaikutus"),
+        ("INFO_CARD3", "Tietokortti 3 – Järjestelmän toimivuus ja läpinäkyvyys"),
+        ("INFO_CARD4", "Tietokortti 4 – Selkeä lajitteluohje / mitä kuuluu mihinkin"),
+        ("INFO_CARD5", "Tietokortti 5 – Sosiaalinen normi ja lähialueen toiminta"),
+    ]
+    return preferred
+
+
+def render_info_ranking_page(page_id: str, scale_map: dict):
+    st.markdown("### Tietokorttien hyödyllisyysjärjestys")
+    st.markdown(
+        "Aseta tietokortit järjestykseen hyödyllisimmästä vähiten hyödylliseen."
+    )
+
+    options = get_info_card_rank_options(scale_map)
+    values = [v for v, _ in options]
+    labels = {v: lbl for v, lbl in options}
+
+    answers = {}
+    rank_labels = [
+        ("RANK1", "Hyödyllisin tietotyyppi"),
+        ("RANK2", "Toiseksi hyödyllisin tietotyyppi"),
+        ("RANK3", "Kolmanneksi hyödyllisin tietotyyppi"),
+        ("RANK4", "Neljänneksi hyödyllisin tietotyyppi"),
+        ("RANK5", "Vähiten hyödyllinen tietotyyppi"),
+    ]
+
+    for rank_id, title in rank_labels:
+        st.markdown(f"**{title}**")
+        answers[rank_id] = st.selectbox(
+            label=title,
+            options=values,
+            format_func=lambda x: labels.get(x, x),
+            key=f"{page_id}_{rank_id}",
+            label_visibility="collapsed",
+        )
+
+    return answers
 
 # =========================================================
 # Review browsers
@@ -1231,11 +1271,11 @@ def finalize_standard_page(page_id: str, tokens: list[str], answers_clean: dict,
         lane = "plastic" if page_id.startswith("PL_") else "bio" if page_id.startswith("BIO_") else "na"
         st.session_state["answers"]["final"][lane] = {
             "ranking": {
-                "1": get_state_ending("_RANK1"),
-                "2": get_state_ending("_RANK2"),
-                "3": get_state_ending("_RANK3"),
-                "4": get_state_ending("_RANK4"),
-                "5": get_state_ending("_RANK5"),
+                "1": answers_clean.get("RANK1", get_state_ending("_RANK1")),
+                "2": answers_clean.get("RANK2", get_state_ending("_RANK2")),
+                "3": answers_clean.get("RANK3", get_state_ending("_RANK3")),
+                "4": answers_clean.get("RANK4", get_state_ending("_RANK4")),
+                "5": answers_clean.get("RANK5", get_state_ending("_RANK5")),
             },
             "forced_choice": choice,
             "open_rationale": (get_state_ending("_WHY") or "").strip(),
@@ -1447,8 +1487,7 @@ if contains_info_cards:
     step = steps[sub_idx]
 
     if step[0] == "intro":
-        intro_content = step[1]
-        for row in intro_content:
+        for row in step[1]:
             render_item(row, {"page_id": page_id, "waste": "na"}, scale_map)
 
         if st.button("Jatka", key=f"{page_id}_intro_next"):
@@ -1465,30 +1504,27 @@ if contains_info_cards:
             submitted = st.form_submit_button("Tallenna ja jatka")
 
         if submitted:
-            partial = st.session_state.get(part_key, {})
+            partial = st.session_state.get(part_key, {}).copy()
             partial.update({k: v for k, v in card_answers.items() if v is not None})
             st.session_state[part_key] = partial
             st.session_state[sub_key] = sub_idx + 1
             scroll_to_top()
             st.rerun()
 
-    elif step[0] == "ranking":
-        ranking_df = pd.DataFrame(step[1])
-
-        with st.form(f"form_{page_id}_ranking", clear_on_submit=False):
-            ranking_answers = {}
-            for _, row in ranking_df.iterrows():
-                item_id = str(row["item_id"]).strip()
-                ranking_answers[item_id] = render_item(row, {"page_id": page_id, "waste": "na"}, scale_map)
-
+    elif step[0] == "ranking_simple":
+        with st.form(f"form_{page_id}_ranking_simple", clear_on_submit=False):
+            ranking_answers = render_info_ranking_page(page_id, scale_map)
             submitted = st.form_submit_button("Tallenna ja jatka")
 
         if submitted:
-            if not validate_ranking_uniqueness():
+            chosen = [ranking_answers.get(f"RANK{i}") for i in range(1, 6)]
+            chosen = [x for x in chosen if x not in (None, "")]
+            if len(chosen) != len(set(chosen)):
+                st.error("Valitse jokaiselle sijalle eri tietokortti.")
                 st.stop()
 
             combined = st.session_state.get(part_key, {}).copy()
-            combined.update({k: v for k, v in ranking_answers.items() if v is not None})
+            combined.update(ranking_answers)
 
             finalize_standard_page(page_id, tokens, combined, item_rows, scale_map, vigs_df)
 
