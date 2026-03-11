@@ -796,7 +796,7 @@ def render_horizontal_radio(question: str, values: list[str], labels: dict[str, 
     return st.radio(
         question,
         values,
-        format_func=lambda x: labels.get(str(x), str(x)),
+        format_func=lambda x: str(x),
         key=key,
         horizontal=True,
         help=help_text or None,
@@ -827,11 +827,20 @@ def render_item(item_row: pd.Series, context: dict, scale_map: dict):
         elif context.get("waste") == "bio":
             question = "Tämä lisäisi omaa biojätteen lajitteluani."
 
-    if response_type in {"info", "markdown", "display", "intro"}:
-        render_markdown_with_media(question)
-        if help_fi:
-            st.caption(help_fi)
-        return None
+    if response_type in {"radio", "select_one", "single", "likert"} and options:
+        values = [str(v) for v, _ in options]
+        labels = {str(v): label for v, label in options}
+
+        show_numeric_only = str(scale_id).upper().startswith("LIKERT")
+
+        return st.radio(
+            question,
+            values,
+            format_func=(lambda x: str(x)) if show_numeric_only else (lambda x: labels.get(str(x), str(x))),
+            key=key,
+            horizontal=True,
+            help=help_fi or None,
+        )
 
     if response_type == "checkbox":
         return st.checkbox(question, key=key, help=help_fi or None)
@@ -952,7 +961,7 @@ def render_construct_blocks_matrix(
                 answers[item_id] = st.radio(
                     label="",
                     options=values,
-                    format_func=lambda x: labels.get(str(x), str(x)),
+                    format_func=lambda x: str(x),
                     key=key,
                     horizontal=True,
                     label_visibility="collapsed",
@@ -966,6 +975,44 @@ def render_construct_blocks_matrix(
 
     return answers
 
+def get_info_card_rank_options() -> list[tuple[str, str]]:
+    return [
+        ("INFO_CARD1", "Tietokortti 1 – Palvelu ja saavutettavuus"),
+        ("INFO_CARD2", "Tietokortti 2 – Hyöty ja kiertotalousvaikutus"),
+        ("INFO_CARD3", "Tietokortti 3 – Järjestelmän toimivuus ja läpinäkyvyys"),
+        ("INFO_CARD4", "Tietokortti 4 – Selkeä lajitteluohje / mitä kuuluu mihinkin"),
+        ("INFO_CARD5", "Tietokortti 5 – Sosiaalinen normi ja lähialueen toiminta"),
+    ]
+
+
+def render_info_ranking_page(page_id: str):
+    st.markdown("### Tietokorttien hyödyllisyysjärjestys")
+    st.markdown("Aseta tietokortit järjestykseen hyödyllisimmästä vähiten hyödylliseen.")
+
+    options = get_info_card_rank_options()
+    values = [v for v, _ in options]
+    labels = {v: lbl for v, lbl in options}
+
+    answers = {}
+    rank_labels = [
+        ("RANK1", "Hyödyllisin tietotyyppi"),
+        ("RANK2", "Toiseksi hyödyllisin tietotyyppi"),
+        ("RANK3", "Kolmanneksi hyödyllisin tietotyyppi"),
+        ("RANK4", "Neljänneksi hyödyllisin tietotyyppi"),
+        ("RANK5", "Vähiten hyödyllinen tietotyyppi"),
+    ]
+
+    for rank_id, title in rank_labels:
+        st.markdown(f"**{title}**")
+        answers[rank_id] = st.selectbox(
+            title,
+            values,
+            format_func=lambda x: labels.get(x, x),
+            key=f"{page_id}_{rank_id}",
+            label_visibility="collapsed",
+        )
+
+    return answers
 
 # =========================================================
 # Info card mini-flow
@@ -974,9 +1021,21 @@ def is_info_card_item(item_id: str) -> bool:
     return bool(re.match(r"^INFO_CARD\d+$", str(item_id).strip().upper()))
 
 
-def is_rank_item(item_id: str) -> bool:
-    item_id = str(item_id).strip().upper()
-    return item_id.startswith("RANK") or "RANK" in item_id
+def is_rank_item(row) -> bool:
+    item_id = str(row.get("item_id", "")).strip().upper()
+    q = str(row.get("question_fi", "")).strip().lower()
+
+    if item_id.startswith("RANK") or "RANK" in item_id:
+        return True
+
+    ranking_phrases = [
+        "hyödyllisin tietotyyppi",
+        "toiseksi hyödyllisin tietotyyppi",
+        "kolmanneksi hyödyllisin tietotyyppi",
+        "neljänneksi hyödyllisin tietotyyppi",
+        "vähiten hyödyllinen tietotyyppi",
+    ]
+    return any(p in q for p in ranking_phrases)
 
 
 def split_info_page(item_rows: pd.DataFrame):
@@ -1000,7 +1059,7 @@ def split_info_page(item_rows: pd.DataFrame):
             intro_rows.append(row)
             continue
 
-        if is_rank_item(item_id):
+        if is_rank_item(row):
             ranking_rows.append(row)
             current_card = None
             continue
@@ -1513,7 +1572,7 @@ if contains_info_cards:
 
     elif step[0] == "ranking_simple":
         with st.form(f"form_{page_id}_ranking_simple", clear_on_submit=False):
-            ranking_answers = render_info_ranking_page(page_id, scale_map)
+            ranking_answers = render_info_ranking_page(page_id)
             submitted = st.form_submit_button("Tallenna ja jatka")
 
         if submitted:
@@ -1532,7 +1591,6 @@ if contains_info_cards:
             reset_subpage_state(page_id)
             scroll_to_top()
             st.rerun()
-
 # ---------------------------------------------------------
 # Standard pages
 # ---------------------------------------------------------
@@ -1550,7 +1608,9 @@ else:
                 & item_rows["construct_id"].astype(str).str.strip().ne("")
             )
             matrix_rows = item_rows[matrix_mask].copy()
-            non_matrix_rows = item_rows[~matrix_mask].copy()
+
+            rendered_ids = set(matrix_rows["item_id"].astype(str).tolist())
+            non_matrix_rows = item_rows[~item_rows["item_id"].astype(str).isin(rendered_ids)].copy()
 
         if not matrix_rows.empty:
             answers.update(
@@ -1580,20 +1640,6 @@ else:
             )
 
         submitted = st.form_submit_button("Jatka")
-
-    if submitted:
-        if "CONSENT" in tokens:
-            answers["CONSENT"] = True
-
-        if not values_exact_two_sevens(item_rows):
-            st.stop()
-
-        answers_clean = {k: v for k, v in answers.items() if v is not None}
-        finalize_standard_page(page_id, tokens, answers_clean, item_rows, scale_map, vigs_df)
-
-        st.session_state["page_idx"] += 1
-        scroll_to_top()
-        st.rerun()
 
 
 # =========================================================
