@@ -536,6 +536,122 @@ def build_submission_payload(scale_map: dict) -> dict:
         "answers": payload_answers,
     }
 
+def get_review_context_group(scale_map: dict) -> str:
+    """
+    Review/browser mode context selector for context-specific info cards.
+    Uses selected survey context if available, otherwise lets reviewer pick.
+    """
+    auto_group = get_area_context_group(scale_map)
+
+    options = {
+        "G1": "G1 – suuri kaupunki / urban",
+        "G2": "G2 – taajama / pienempi kaupunki",
+        "G3": "G3 – maaseutu / hajautettu",
+    }
+
+    default_idx = ["G1", "G2", "G3"].index(auto_group) if auto_group in options else 1
+
+    selected = st.selectbox(
+        "Konteksti",
+        options=list(options.keys()),
+        index=default_idx,
+        format_func=lambda x: options[x],
+        key="review_context_group",
+    )
+    return selected
+
+
+def get_contextual_info_image_for_group(item_id: str, group: str) -> Path | None:
+    item_id = str(item_id).strip().upper()
+
+    filename_map = {
+        "INFO_CARD1": {
+            "G1": "INFO1_G1.png",
+            "G2": "INFO1_G2.png",
+            "G3": "INFO1_G3.png",
+        },
+        "INFO_CARD5": {
+            "G1": "INFO5_G1.png",
+            "G2": "INFO5_G2.png",
+            "G3": "INFO5_G3.png",
+        },
+    }
+
+    filename = filename_map.get(item_id, {}).get(group)
+    if not filename:
+        return None
+
+    candidates = [
+        BASE_DIR / "media" / filename,
+        BASE_DIR / filename,
+        Path("/mnt/data") / filename,
+    ]
+
+    for path in candidates:
+        if path.exists():
+            return path
+    return None
+
+
+def get_contextual_info_text_for_group(item_id: str, original_text: str, group: str) -> str:
+    item_id = str(item_id).strip().upper()
+
+    card1_text = {
+        "G1": (
+            "### Tietokortti 1: Palvelu ja saavutettavuus\n\n"
+            "Kun lajittelupaikka on helposti saavutettavissa ja sen käyttö on selkeää, "
+            "muovipakkausten lajittelu sujuu helpommin arjessa kerrostalo- ja kaupunkiympäristössä."
+        ),
+        "G2": (
+            "### Tietokortti 1: Palvelu ja saavutettavuus\n\n"
+            "Kun lajittelupaikka on helposti saavutettavissa ja sen käyttö on selkeää, "
+            "muovipakkausten lajittelu sujuu helpommin arjessa taajamaympäristössä."
+        ),
+        "G3": (
+            "### Tietokortti 1: Palvelu ja saavutettavuus\n\n"
+            "Kun lajittelupaikka on helposti saavutettavissa ja sen käyttö on selkeää, "
+            "muovipakkausten lajittelu sujuu helpommin arjessa haja-asutus- ja maaseutuympäristössä."
+        ),
+    }
+
+    card5_text = {
+        "G1": (
+            "### Tietokortti 5: Sosiaalinen normi ja lähialueen toiminta\n\n"
+            "Tieto siitä, miten muut omalla alueella toimivat, voi auttaa hahmottamaan "
+            "muovipakkausten lajittelua tavallisena ja käytännöllisenä osana arkea kaupunkiympäristössä."
+        ),
+        "G2": (
+            "### Tietokortti 5: Sosiaalinen normi ja lähialueen toiminta\n\n"
+            "Tieto siitä, miten muut omalla alueella toimivat, voi auttaa hahmottamaan "
+            "muovipakkausten lajittelua tavallisena ja käytännöllisenä osana arkea taajamaympäristössä."
+        ),
+        "G3": (
+            "### Tietokortti 5: Sosiaalinen normi ja lähialueen toiminta\n\n"
+            "Tieto siitä, miten muut omalla alueella toimivat, voi auttaa hahmottamaan "
+            "muovipakkausten lajittelua tavallisena ja käytännöllisenä osana arkea maaseutuympäristössä."
+        ),
+    }
+
+    if item_id == "INFO_CARD1":
+        return card1_text.get(group, original_text)
+    if item_id == "INFO_CARD5":
+        return card5_text.get(group, original_text)
+    return original_text
+
+
+def render_info_card_content(item_id: str, raw_text: str, scale_map: dict, review_group: str | None = None) -> None:
+    item_id = str(item_id).strip().upper()
+    group = review_group or get_area_context_group(scale_map)
+
+    contextual_img = get_contextual_info_image_for_group(item_id, group)
+    contextual_text = get_contextual_info_text_for_group(item_id, raw_text, group)
+
+    if contextual_img is not None:
+        st.image(str(contextual_img), use_container_width=True)
+        st.markdown(contextual_text)
+        return
+
+    render_content_image_first(raw_text)
 
 # =========================================================
 # Validation
@@ -662,11 +778,17 @@ def render_item(item_row: pd.Series, context: dict, scale_map: dict):
         elif context.get("waste") == "bio":
             question = "Tämä lisäisi omaa biojätteen lajitteluani."
 
-    if response_type in {"info", "markdown", "display", "intro"}:
-        render_markdown_with_media(question)
-        if help_fi:
-            st.caption(help_fi)
-        return None
+    if response_type in {"radio", "select_one", "single", "likert"} and options:
+        values = [str(v) for v, _ in options]
+        labels = {str(v): label for v, label in options}
+        return st.radio(
+            question,
+            values,
+            format_func=lambda x: labels.get(str(x), str(x)),
+            key=key,
+            horizontal=True,
+            help=help_fi or None,
+        )
 
     if response_type == "checkbox":
         return st.checkbox(question, key=key, help=help_fi or None)
@@ -752,19 +874,26 @@ def render_construct_blocks_matrix(
             if show_label:
                 st.markdown(f"### {label}")
 
+            st.markdown(
+                "Valitse kunkin väittämän kohdalla vaihtoehto, joka kuvaa mielipidettäsi parhaiten."
+            )
+
             for _, row in likert_like.iterrows():
                 item_id = str(row["item_id"]).strip()
                 question = str(row.get("question_fi", "")).strip()
+
                 key = f"{page_id}_{item_id}"
                 if isinstance(vignette, dict) and vignette.get("vignette_id"):
                     key = f"{vignette['vignette_id']}_{item_id}"
 
+                st.markdown(f"**{question}**")
                 answers[item_id] = st.radio(
-                    question,
-                    values,
+                    label="",
+                    options=values,
                     format_func=lambda x: labels.get(str(x), str(x)),
                     key=key,
                     horizontal=True,
+                    label_visibility="collapsed",
                 )
 
             if len(values) >= 3:
@@ -864,10 +993,29 @@ def render_vignette_browser(records: list[dict], title: str, state_key: str):
         st.info("Sisältöä ei löytynyt.")
         st.stop()
 
-    show_all = st.checkbox("Näytä kaikki valitut tilannekuvat", key=f"{state_key}_show_all")
+    all_strata = sorted({str(r.get("stratum", "")).strip() for r in records if str(r.get("stratum", "")).strip()})
+    default_stratum = st.session_state.get("stratum")
+    if default_stratum not in all_strata and all_strata:
+        default_stratum = all_strata[0]
+
+    selected_stratum = st.selectbox(
+        "Stratum / konteksti",
+        options=all_strata,
+        index=all_strata.index(default_stratum) if default_stratum in all_strata else 0,
+        key=f"{state_key}_stratum",
+    )
+
+    filtered = [r for r in records if str(r.get("stratum", "")).strip() == selected_stratum]
+    filtered = sorted(filtered, key=lambda r: str(r.get("vignette_id", "")))
+
+    if not filtered:
+        st.info("Valitulle kontekstille ei löytynyt vignettiä.")
+        st.stop()
+
+    show_all = st.checkbox("Näytä kaikki 3 tämän kontekstin tilannekuvaa", value=True, key=f"{state_key}_show_all")
 
     if show_all:
-        for rec in records:
+        for rec in filtered:
             st.markdown("---")
             st.markdown(f"### {rec.get('vignette_id', '')} – {rec.get('title_fi', '')}")
             st.caption(f"Arm: {rec.get('arm_id', '')} | Stratum: {rec.get('stratum', '')}")
@@ -875,8 +1023,8 @@ def render_vignette_browser(records: list[dict], title: str, state_key: str):
         st.stop()
 
     idx = int(st.session_state.get(state_key, 0))
-    idx = max(0, min(idx, len(records) - 1))
-    rec = records[idx]
+    idx = max(0, min(idx, len(filtered) - 1))
+    rec = filtered[idx]
 
     c1, c2, c3 = st.columns([1, 3, 1])
     with c1:
@@ -885,17 +1033,17 @@ def render_vignette_browser(records: list[dict], title: str, state_key: str):
             st.rerun()
     with c2:
         selected = st.selectbox(
-            "Valitse tilannekuva",
-            options=list(range(len(records))),
+            "Valitse sivu",
+            options=list(range(len(filtered))),
             index=idx,
-            format_func=lambda i: f"{records[i].get('vignette_id', '')} – {records[i].get('title_fi', '')}",
+            format_func=lambda i: f"{filtered[i].get('vignette_id', '')} – {filtered[i].get('title_fi', '')}",
             key=f"select_{state_key}",
         )
         if selected != idx:
             st.session_state[state_key] = selected
             st.rerun()
     with c3:
-        if st.button("Seuraava", disabled=idx >= len(records) - 1, key=f"next_{state_key}"):
+        if st.button("Seuraava", disabled=idx >= len(filtered) - 1, key=f"next_{state_key}"):
             st.session_state[state_key] = idx + 1
             st.rerun()
 
@@ -911,16 +1059,17 @@ def render_info_browser(records: list[dict], state_key: str, scale_map: dict):
         st.info("Tietokortteja ei löytynyt.")
         st.stop()
 
+    review_group = get_review_context_group(scale_map)
     show_all = st.checkbox("Näytä kaikki tietokortit", key=f"{state_key}_show_all")
 
     if show_all:
         for rec in records:
             st.markdown("---")
-            st.markdown(f"### {rec.get('item_id', '')}")
             render_info_card_content(
                 str(rec.get("item_id", "")),
                 str(rec.get("question_fi", "")),
                 scale_map,
+                review_group=review_group,
             )
         st.stop()
 
@@ -935,7 +1084,7 @@ def render_info_browser(records: list[dict], state_key: str, scale_map: dict):
             st.rerun()
     with c2:
         selected = st.selectbox(
-            "Valitse tietokortti",
+            "Valitse sivu",
             options=list(range(len(records))),
             index=idx,
             format_func=lambda i: str(records[i].get("item_id", "")),
@@ -949,11 +1098,11 @@ def render_info_browser(records: list[dict], state_key: str, scale_map: dict):
             st.session_state[state_key] = idx + 1
             st.rerun()
 
-    st.markdown(f"### {rec.get('item_id', '')}")
     render_info_card_content(
         str(rec.get("item_id", "")),
         str(rec.get("question_fi", "")),
         scale_map,
+        review_group=review_group,
     )
     st.stop()
 
@@ -1245,7 +1394,7 @@ if contains_info_cards:
         card = step[2]
 
         with st.form(f"form_{page_id}_card_{card_no}", clear_on_submit=False):
-            card_answers = render_info_card_step(page_id, card_no, card, scale_map)
+            card_answers = render_info_card_content(item_id, content_text, scale_map)
             submitted = st.form_submit_button("Tallenna ja jatka")
 
         if submitted:
