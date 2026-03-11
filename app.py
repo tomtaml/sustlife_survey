@@ -1456,9 +1456,6 @@ if is_vignette_page:
         .reset_index(drop=True)
     )
 
-    st.write("VIGNETTE TOKENS:", items_for_page)
-    st.write("VIGNETTE ITEM IDS:", item_rows["item_id"].astype(str).tolist())
-
     with st.form(f"form_{page_id}_{vignette.get('vignette_id', '')}", clear_on_submit=False):
         answers = {}
 
