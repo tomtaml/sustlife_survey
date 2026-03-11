@@ -1451,7 +1451,7 @@ if is_vignette_page:
     items_for_page = parse_items_list(vignette.get("constructs_to_show_items", "")) or tokens
     item_rows = get_item_rows_by_tokens(items_df, items_for_page)
 
-    # hard dedupe before any rendering
+    # hard dedupe before rendering
     item_rows = (
         item_rows.drop_duplicates(subset=["item_id"], keep="first")
         .reset_index(drop=True)
@@ -1460,45 +1460,9 @@ if is_vignette_page:
     with st.form(f"form_{page_id}_{vignette.get('vignette_id', '')}", clear_on_submit=False):
         answers = {}
 
-        # only real multi-item likert blocks go to matrix rendering
-        matrix_mask = (
-            item_rows["response_type"].astype(str).str.lower().isin(["radio", "likert", "single", "select_one"])
-            & item_rows["scale_id"].astype(str).str.upper().str.startswith("LIKERT")
-            & item_rows["construct_id"].astype(str).str.strip().ne("")
-        )
-
-        matrix_rows = item_rows[matrix_mask].copy()
-        matrix_rows = matrix_rows.drop_duplicates(subset=["item_id"], keep="first").reset_index(drop=True)
-
-        # render matrix only for constructs with 2+ rows
-        valid_constructs = (
-            matrix_rows.groupby("construct_id")["item_id"].count()
-            .loc[lambda s: s >= 2]
-            .index
-            .tolist()
-        )
-        matrix_rows = matrix_rows[matrix_rows["construct_id"].isin(valid_constructs)].copy()
-
-        rendered_ids = set(matrix_rows["item_id"].astype(str).tolist())
-        non_matrix_rows = (
-            item_rows[~item_rows["item_id"].astype(str).isin(rendered_ids)]
-            .drop_duplicates(subset=["item_id"], keep="first")
-            .reset_index(drop=True)
-        )
-
-        if not matrix_rows.empty:
-            answers.update(
-                render_construct_blocks_matrix(
-                    item_rows=matrix_rows,
-                    scale_map=scale_map,
-                    page_id=page_id,
-                    waste=lane,
-                    construct_label_map=construct_label_map,
-                    vignette=vignette,
-                )
-            )
-
-        for _, row in non_matrix_rows.iterrows():
+        # Render each vignette question exactly once, in flow order.
+        # No matrix split here.
+        for _, row in item_rows.iterrows():
             item_id = str(row["item_id"]).strip()
             answers[item_id] = render_item(
                 row,
@@ -1506,7 +1470,11 @@ if is_vignette_page:
                     "page_id": page_id,
                     "waste": lane,
                     "vignette": vignette,
-                    "vignette_pool": st.session_state.get("plastic_pool", []) if lane == "plastic" else st.session_state.get("bio_pool", []),
+                    "vignette_pool": (
+                        st.session_state.get("plastic_pool", [])
+                        if lane == "plastic"
+                        else st.session_state.get("bio_pool", [])
+                    ),
                 },
                 scale_map,
             )
