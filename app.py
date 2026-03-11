@@ -237,22 +237,36 @@ def route_stratum(area_type_label: str, housing_label: str) -> str:
 
 
 def get_item_rows_by_tokens(items_df: pd.DataFrame, tokens: list[str]) -> pd.DataFrame:
-    parts = []
+    ordered_parts = []
     construct_ids = set(items_df["construct_id"].astype(str).tolist())
 
     for token in tokens:
         token = str(token).strip()
         if not token:
             continue
-        if token in construct_ids:
-            parts.append(items_df[items_df["construct_id"] == token].copy())
-        else:
-            parts.append(items_df[items_df["item_id"] == token].copy())
 
-    if not parts:
+        if token in construct_ids:
+            block = items_df[items_df["construct_id"] == token].copy()
+            if not block.empty:
+                block["_flow_token"] = token
+                block["_flow_order"] = len(ordered_parts)
+                ordered_parts.append(block)
+        else:
+            row = items_df[items_df["item_id"] == token].copy()
+            if not row.empty:
+                row["_flow_token"] = token
+                row["_flow_order"] = len(ordered_parts)
+                ordered_parts.append(row)
+
+    if not ordered_parts:
         return items_df.iloc[0:0].copy()
 
-    out = pd.concat(parts, ignore_index=True)
+    out = pd.concat(ordered_parts, ignore_index=True)
+
+    # preserve FLOW order exactly, while keeping original workbook order inside construct blocks
+    if "_flow_order" in out.columns:
+        out = out.sort_values("_flow_order", kind="stable")
+
     return out.reset_index(drop=True)
 
 
@@ -1017,7 +1031,6 @@ def render_info_card_step(page_id: str, step_idx: int, card: dict, scale_map: di
     item_id = str(content_row.get("item_id", "")).strip()
     content_text = str(content_row.get("question_fi", "")).strip()
 
-    st.markdown(f"### Tietokortti {step_idx}")
     render_info_card_content(item_id, content_text, scale_map)
 
     help_text = str(content_row.get("help_fi", "")).strip()
@@ -1317,14 +1330,22 @@ if is_vignette_page:
     with st.form(f"form_{page_id}_{vignette.get('vignette_id', '')}", clear_on_submit=False):
         answers = {}
 
-        has_many_likert = (
-            not item_rows.empty
-            and (item_rows["scale_id"].astype(str).str.upper().str.startswith("LIKERT")).sum() >= 3
-        )
-        if has_many_likert:
+        matrix_rows = pd.DataFrame(columns=item_rows.columns)
+        non_matrix_rows = item_rows.copy()
+
+        if not item_rows.empty:
+            matrix_mask = (
+                item_rows["response_type"].astype(str).str.lower().isin(["radio", "likert", "single", "select_one"])
+                & item_rows["scale_id"].astype(str).str.upper().str.startswith("LIKERT")
+                & item_rows["construct_id"].astype(str).str.strip().ne("")
+            )
+            matrix_rows = item_rows[matrix_mask].copy()
+            non_matrix_rows = item_rows[~matrix_mask].copy()
+
+        if not matrix_rows.empty:
             answers.update(
                 render_construct_blocks_matrix(
-                    item_rows=item_rows,
+                    item_rows=matrix_rows,
                     scale_map=scale_map,
                     page_id=page_id,
                     waste=lane,
@@ -1333,10 +1354,8 @@ if is_vignette_page:
                 )
             )
 
-        for _, row in item_rows.iterrows():
+        for _, row in non_matrix_rows.iterrows():
             item_id = str(row["item_id"]).strip()
-            if item_id in answers:
-                continue
             answers[item_id] = render_item(
                 row,
                 {
@@ -1442,7 +1461,7 @@ if contains_info_cards:
         card = step[2]
 
         with st.form(f"form_{page_id}_card_{card_no}", clear_on_submit=False):
-            card_answers = render_info_card_content(item_id, content_text, scale_map)
+            card_answers = render_info_card_step(page_id, card_no, card, scale_map)
             submitted = st.form_submit_button("Tallenna ja jatka")
 
         if submitted:
@@ -1485,14 +1504,22 @@ else:
     with st.form(f"form_{page_id}", clear_on_submit=False):
         answers = {}
 
-        has_many_likert = (
-            not item_rows.empty
-            and (item_rows["scale_id"].astype(str).str.upper().str.startswith("LIKERT")).sum() >= 3
-        )
-        if has_many_likert:
+        matrix_rows = pd.DataFrame(columns=item_rows.columns)
+        non_matrix_rows = item_rows.copy()
+
+        if not item_rows.empty:
+            matrix_mask = (
+                item_rows["response_type"].astype(str).str.lower().isin(["radio", "likert", "single", "select_one"])
+                & item_rows["scale_id"].astype(str).str.upper().str.startswith("LIKERT")
+                & item_rows["construct_id"].astype(str).str.strip().ne("")
+            )
+            matrix_rows = item_rows[matrix_mask].copy()
+            non_matrix_rows = item_rows[~matrix_mask].copy()
+
+        if not matrix_rows.empty:
             answers.update(
                 render_construct_blocks_matrix(
-                    item_rows=item_rows,
+                    item_rows=matrix_rows,
                     scale_map=scale_map,
                     page_id=page_id,
                     waste="na",
@@ -1500,10 +1527,8 @@ else:
                 )
             )
 
-        for _, row in item_rows.iterrows():
+        for _, row in non_matrix_rows.iterrows():
             item_id = str(row["item_id"]).strip()
-            if item_id in answers:
-                continue
             answers[item_id] = render_item(
                 row,
                 {
