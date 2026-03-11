@@ -1496,6 +1496,8 @@ if is_vignette_page:
         st.session_state["page_idx"] += 1
         scroll_to_top()
         st.rerun()
+
+    st.stop()
 # ---------------------------------------------------------
 # Non-vignette pages
 # ---------------------------------------------------------
