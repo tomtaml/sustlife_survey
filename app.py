@@ -1437,7 +1437,6 @@ st.subheader(title_fi if title_fi else page_id)
 # ---------------------------------------------------------
 # Vignette pages
 # ---------------------------------------------------------
-
 is_vignette_page = bool(re.match(r"^(PL|BIO)_V\d+$", page_id.strip().upper()))
 if is_vignette_page:
     ensure_vignette_pool(vigs_df, scale_map)
@@ -1451,8 +1450,6 @@ if is_vignette_page:
 
     items_for_page = parse_items_list(vignette.get("constructs_to_show_items", "")) or tokens
     item_rows = get_item_rows_by_tokens(items_df, items_for_page)
-
-    # hard dedupe before rendering
     item_rows = (
         item_rows.drop_duplicates(subset=["item_id"], keep="first")
         .reset_index(drop=True)
@@ -1464,8 +1461,7 @@ if is_vignette_page:
     with st.form(f"form_{page_id}_{vignette.get('vignette_id', '')}", clear_on_submit=False):
         answers = {}
 
-        # Render each vignette question exactly once, in flow order.
-        # No matrix split here.
+        # IMPORTANT: render each vignette item exactly once
         for _, row in item_rows.iterrows():
             item_id = str(row["item_id"]).strip()
             answers[item_id] = render_item(
@@ -1498,7 +1494,6 @@ if is_vignette_page:
         st.session_state["page_idx"] += 1
         scroll_to_top()
         st.rerun()
-
 # ---------------------------------------------------------
 # Non-vignette pages
 # ---------------------------------------------------------
