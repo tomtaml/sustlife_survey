@@ -57,13 +57,13 @@ def resolve_driver_path() -> Path:
         "Suslife_master_driver_v4_info.xlsx",
         "Suslife_master_driver_v2_harmonized_vignettes.xlsx",
         "Suslife_master_driver_v2_checked.xlsx",
-        "Suslife_master_driver",
+        "Suslife_master_driver.xlsx",
     ]
     for name in candidates:
         path = BASE_DIR / name
         if path.exists():
             return path
-    return BASE_DIR / "Suslife_master_driver"
+    return BASE_DIR / "Suslife_master_driver.xlsx"
 
 
 DRIVER_XLSX = resolve_driver_path()
